@@ -34,7 +34,7 @@ DNSServer dnsServer;
 // Bump FW_VERSION on every release; the CI publishes it to version.txt and the
 // device compares against it. URLs point at a fixed pre-release tag so the
 // ESP8266 never picks up the repo's ESP32-C3 releases.
-#define FW_VERSION "2.2.3"
+#define FW_VERSION "2.2.5"
 // Daily automatic OTA check, deliberately offset from the 00:00 prayer refresh so they never collide
 #define OTA_CHECK_HOUR 0
 #define OTA_CHECK_MIN  30
@@ -1125,25 +1125,29 @@ bool isNewer(const String &remote, const char *local) {
 String runOtaCheck(bool applyUpdate) {
   if (WiFi.status() != WL_CONNECTED) { otaStatus = "No WiFi"; return otaStatus; }
 
-  WiFiClientSecure client;
-  client.setInsecure();          // GitHub is HTTPS-only; we don't pin a cert
-  client.setTimeout(15000);
+  // Each HTTPS step runs in its own scope so its ~16KB BearSSL buffer is released
+  // before the next one - the ESP8266 has only ~24KB free, not enough for two at once.
 
-  // 1) Read the published version string (small file)
-  HTTPClient http;
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(15000);
-  http.setUserAgent("ESP8266-MyAthan");
-  if (!http.begin(client, OTA_VERSION_URL)) { otaStatus = "OTA begin failed"; return otaStatus; }
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
+  // 1) Read the published version string.
+  String remote;
+  {
+    WiFiClientSecure vc;
+    vc.setInsecure();
+    HTTPClient http;
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setTimeout(15000);
+    http.setUserAgent("ESP8266-MyAthan");
+    if (!http.begin(vc, OTA_VERSION_URL)) { otaStatus = "OTA begin failed"; return otaStatus; }
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+      http.end();
+      otaStatus = "No release (HTTP " + String(code) + ")";
+      Serial.printf("[OTA] version check HTTP %d\n", code);
+      return otaStatus;
+    }
+    remote = http.getString();
     http.end();
-    otaStatus = "No release (HTTP " + String(code) + ")";
-    Serial.printf("[OTA] version check HTTP %d\n", code);
-    return otaStatus;
   }
-  String remote = http.getString();
-  http.end();
   remote.trim();
   if (remote.length() == 0) { otaStatus = "Empty version file"; return otaStatus; }
   Serial.printf("[OTA] installed=%s latest=%s\n", FW_VERSION, remote.c_str());
@@ -1151,30 +1155,34 @@ String runOtaCheck(bool applyUpdate) {
   if (!isNewer(remote, FW_VERSION)) { otaStatus = "Up to date (" FW_VERSION ")"; return otaStatus; }
   if (!applyUpdate) { otaStatus = "Update available: " + remote; return otaStatus; }
 
-  // 2) GitHub serves asset downloads as a 302 redirect to objects.githubusercontent.com.
-  // ESPhttpUpdate does not follow that reliably (it reports "Wrong HTTP Code"), so we
-  // resolve the real download URL ourselves and hand the resolved URL to the updater.
-  String binUrl = OTA_BIN_URL;
+  // 2) GitHub redirects asset downloads (github.com -> objects.githubusercontent.com).
+  // The updater path doesn't follow that, so resolve the real URL ourselves. Own scope
+  // (and freed buffer) gives enough heap to actually capture the long Location header.
+  String binUrl;
   {
+    WiFiClientSecure rc;
+    rc.setInsecure();
     HTTPClient rh;
-    rh.begin(client, OTA_BIN_URL);
+    rh.setTimeout(15000);
+    rh.setUserAgent("ESP8266-MyAthan");
     rh.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     const char *hk[] = { "Location" };
+    rh.begin(rc, OTA_BIN_URL);
     rh.collectHeaders(hk, 1);
-    int rc = rh.GET();
-    if (rc >= 300 && rc < 400) {
-      String loc = rh.header("Location");
-      if (loc.length()) binUrl = loc;
-    }
+    int code = rh.GET();
+    if (code >= 300 && code < 400) binUrl = rh.header("Location");
     rh.end();
-    Serial.printf("[OTA] asset HTTP %d -> %s\n", rc, binUrl.c_str());
+    Serial.printf("[OTA] resolve HTTP %d  loc_len=%d  heap=%d\n", code, binUrl.length(), ESP.getFreeHeap());
   }
+  if (binUrl.length() == 0) { otaStatus = "Update failed: redirect not resolved"; return otaStatus; }
 
-  // 3) Download + flash the resolved image. Reboots automatically on success.
+  // 3) Download + flash from the resolved direct URL (returns 200, no redirect).
   otaStatus = "Updating to " + remote + "...";
   Serial.printf("[OTA] downloading (heap=%d)\n", ESP.getFreeHeap());
+  WiFiClientSecure dc;
+  dc.setInsecure();
   ESPhttpUpdate.rebootOnUpdate(true);
-  t_httpUpdate_return ret = ESPhttpUpdate.update(client, binUrl);
+  t_httpUpdate_return ret = ESPhttpUpdate.update(dc, binUrl);
   if (ret == HTTP_UPDATE_FAILED) {
     otaStatus = "Update failed: " + ESPhttpUpdate.getLastErrorString();
     Serial.printf("[OTA] FAILED (%d) %s\n",
