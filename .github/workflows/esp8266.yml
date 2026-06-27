@@ -1,0 +1,71 @@
+name: ESP8266 Firmware (OTA)
+
+# Builds the ESP8266 sketch under esp8266/ and publishes firmware.bin + version.txt
+# to the fixed "esp8266-latest" pre-release tag, which the device pulls over the air.
+# Scoped to esp8266/** so it never touches or depends on the ESP32-C3 project.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'esp8266/**'
+      - '.github/workflows/esp8266.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'esp8266/**'
+      - '.github/workflows/esp8266.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP8266 core
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp8266:esp8266@3.1.2
+
+      - name: Compile firmware
+        run: |
+          arduino-cli compile \
+            --fqbn esp8266:esp8266:nodemcuv2 \
+            --libraries esp8266/libraries \
+            --output-dir build \
+            esp8266/MyAthan_OTA
+
+      - name: Prepare release assets
+        id: prep
+        run: |
+          VERSION=$(grep -oP '#define\s+FW_VERSION\s+"\K[^"]+' esp8266/MyAthan_OTA/MyAthan_OTA.ino)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          cp build/MyAthan_OTA.ino.bin firmware.bin
+          printf '%s' "$VERSION" > version.txt
+          echo "ESP8266 firmware v$VERSION ($(stat -c%s firmware.bin) bytes)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish esp8266-latest pre-release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: esp8266-latest
+          name: ESP8266 firmware (latest)
+          prerelease: true
+          files: |
+            firmware.bin
+            version.txt
+          body: |
+            Auto-built **ESP8266** MyAthan firmware **v${{ steps.prep.outputs.version }}**.
+
+            The ESP8266 device pulls `firmware.bin` + `version.txt` from this fixed
+            `esp8266-latest` tag (kept separate from the ESP32-C3 `v*` releases so the
+            two devices never download each other's binaries).
