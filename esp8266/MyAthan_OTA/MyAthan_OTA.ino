@@ -34,7 +34,10 @@ DNSServer dnsServer;
 // Bump FW_VERSION on every release; the CI publishes it to version.txt and the
 // device compares against it. URLs point at a fixed pre-release tag so the
 // ESP8266 never picks up the repo's ESP32-C3 releases.
-#define FW_VERSION "2.2.0"
+#define FW_VERSION "2.2.1"
+// Daily automatic OTA check, deliberately offset from the 00:00 prayer refresh so they never collide
+#define OTA_CHECK_HOUR 0
+#define OTA_CHECK_MIN  30
 const char *OTA_VERSION_URL =
     "https://github.com/Mecharonix/myathan-firmware/releases/download/esp8266-latest/version.txt";
 const char *OTA_BIN_URL =
@@ -1392,6 +1395,19 @@ void loop() {
         digitalWrite(READY_PIN, HIGH);
       }
     }
+  }
+
+  // === DAILY AUTO OTA CHECK (00:30 - offset from the 00:00 prayer refresh) ===
+  // Runs once per day, only when idle (no athan playing) and online. Installs +
+  // reboots automatically if a newer firmware has been published to GitHub.
+  static int lastOtaCheckDay = -1;
+  if (timeinfo->tm_year > 100 && WiFi.status() == WL_CONNECTED && hasFirstSync &&
+      !isAthanActive &&
+      timeinfo->tm_hour == OTA_CHECK_HOUR && timeinfo->tm_min == OTA_CHECK_MIN &&
+      timeinfo->tm_mday != lastOtaCheckDay) {
+    lastOtaCheckDay = timeinfo->tm_mday;  // set first so a failed update won't retry-loop
+    Serial.println("[OTA] Daily auto-check");
+    runOtaCheck(true);
   }
 
   // === ATHAN DEACTIVATION ===
