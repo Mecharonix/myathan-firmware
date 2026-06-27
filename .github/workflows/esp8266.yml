@@ -6,12 +6,7 @@ name: ESP8266 Firmware (OTA)
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'esp8266/**'
-      - '.github/workflows/esp8266.yml'
-  pull_request:
-    branches: [main]
+    branches: [esp8266-ota]
     paths:
       - 'esp8266/**'
       - '.github/workflows/esp8266.yml'
