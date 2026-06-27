@@ -34,7 +34,7 @@ DNSServer dnsServer;
 // Bump FW_VERSION on every release; the CI publishes it to version.txt and the
 // device compares against it. URLs point at a fixed pre-release tag so the
 // ESP8266 never picks up the repo's ESP32-C3 releases.
-#define FW_VERSION "2.2.1"
+#define FW_VERSION "2.2.3"
 // Daily automatic OTA check, deliberately offset from the 00:00 prayer refresh so they never collide
 #define OTA_CHECK_HOUR 0
 #define OTA_CHECK_MIN  30
@@ -1105,6 +1105,20 @@ bool fetchPrayerTimes() {
   return found == 5;
 }
 
+// True if dotted-numeric version `remote` is strictly newer than `local` (e.g. "2.2.3" > "2.2.2").
+bool isNewer(const String &remote, const char *local) {
+  int rp = 0; const char *lp = local;
+  while (rp < (int)remote.length() || *lp) {
+    long rn = 0, ln = 0;
+    while (rp < (int)remote.length() && remote[rp] != '.') { if (remote[rp] >= '0' && remote[rp] <= '9') rn = rn * 10 + (remote[rp] - '0'); rp++; }
+    while (*lp && *lp != '.') { if (*lp >= '0' && *lp <= '9') ln = ln * 10 + (*lp - '0'); lp++; }
+    if (rn != ln) return rn > ln;
+    if (rp < (int)remote.length()) rp++;   // skip '.'
+    if (*lp) lp++;
+  }
+  return false;
+}
+
 // =====================================================
 // OTA - pull firmware from GitHub Releases
 // =====================================================
@@ -1134,15 +1148,33 @@ String runOtaCheck(bool applyUpdate) {
   if (remote.length() == 0) { otaStatus = "Empty version file"; return otaStatus; }
   Serial.printf("[OTA] installed=%s latest=%s\n", FW_VERSION, remote.c_str());
 
-  if (remote == FW_VERSION) { otaStatus = "Up to date (" FW_VERSION ")"; return otaStatus; }
+  if (!isNewer(remote, FW_VERSION)) { otaStatus = "Up to date (" FW_VERSION ")"; return otaStatus; }
   if (!applyUpdate) { otaStatus = "Update available: " + remote; return otaStatus; }
 
-  // 2) Download + flash the new image. Reboots automatically on success.
+  // 2) GitHub serves asset downloads as a 302 redirect to objects.githubusercontent.com.
+  // ESPhttpUpdate does not follow that reliably (it reports "Wrong HTTP Code"), so we
+  // resolve the real download URL ourselves and hand the resolved URL to the updater.
+  String binUrl = OTA_BIN_URL;
+  {
+    HTTPClient rh;
+    rh.begin(client, OTA_BIN_URL);
+    rh.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    const char *hk[] = { "Location" };
+    rh.collectHeaders(hk, 1);
+    int rc = rh.GET();
+    if (rc >= 300 && rc < 400) {
+      String loc = rh.header("Location");
+      if (loc.length()) binUrl = loc;
+    }
+    rh.end();
+    Serial.printf("[OTA] asset HTTP %d -> %s\n", rc, binUrl.c_str());
+  }
+
+  // 3) Download + flash the resolved image. Reboots automatically on success.
   otaStatus = "Updating to " + remote + "...";
-  Serial.printf("[OTA] downloading %s  (heap=%d)\n", OTA_BIN_URL, ESP.getFreeHeap());
-  ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  Serial.printf("[OTA] downloading (heap=%d)\n", ESP.getFreeHeap());
   ESPhttpUpdate.rebootOnUpdate(true);
-  t_httpUpdate_return ret = ESPhttpUpdate.update(client, OTA_BIN_URL);
+  t_httpUpdate_return ret = ESPhttpUpdate.update(client, binUrl);
   if (ret == HTTP_UPDATE_FAILED) {
     otaStatus = "Update failed: " + ESPhttpUpdate.getLastErrorString();
     Serial.printf("[OTA] FAILED (%d) %s\n",
