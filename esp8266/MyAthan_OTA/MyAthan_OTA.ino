@@ -34,7 +34,7 @@ DNSServer dnsServer;
 // Bump FW_VERSION on every release; the CI publishes it to version.txt and the
 // device compares against it. URLs point at a fixed pre-release tag so the
 // ESP8266 never picks up the repo's ESP32-C3 releases.
-#define FW_VERSION "2.2.5"
+#define FW_VERSION "2.2.6"
 // Daily automatic OTA check, deliberately offset from the 00:00 prayer refresh so they never collide
 #define OTA_CHECK_HOUR 0
 #define OTA_CHECK_MIN  30
@@ -63,8 +63,17 @@ String otaStatus = "Idle";
 #define MAGIC1 0xCA
 #define MAGIC2 0xFE
 
+// Keep retrying a saved STA network while the setup portal is up (power-loss:
+// device often boots before the router). Stop only when the portal saves new
+// credentials (handleSave restarts) or the saved network comes back.
+#define WIFI_RETRY_INTERVAL_MS 15000
+
 // --- State ---
 bool isAPMode = false;
+bool hasSavedWifi = false;
+String savedSsid;
+String savedPass;
+unsigned long lastWifiRetry = 0;
 bool firstSync = true;
 float myLat = 0.0, myLon = 0.0;
 long currentOffset = 0;
@@ -266,6 +275,12 @@ boolean handleCaptivePortal() {
 }
 
 void handleRoot() {
+  // After a late STA connect we stay on the same HTTP server; / was registered
+  // for the portal first, so dispatch here instead of adding a second handler.
+  if (!isAPMode) {
+    serveControlPage();
+    return;
+  }
   if (handleCaptivePortal()) return;
   serveSetupPage();
 }
@@ -1237,6 +1252,48 @@ void doFullSync() {
   }
 }
 
+void registerControlRoutes() {
+  server.on("/play", handlePlay);
+  server.on("/stop", handleStop);
+  server.on("/status", handleStatus);
+  server.on("/api/status", handleApiStatus);
+  server.on("/api/location", HTTP_POST, handleSetLocation);
+  server.on("/api/auto", HTTP_POST, handleSetAuto);
+  server.on("/api/settings", HTTP_POST, handleSetSettings);
+  server.on("/api/tune", HTTP_POST, handleSetTune);
+  server.on("/api/sync", HTTP_POST, handleManualSync);
+  server.on("/api/volume", HTTP_POST, handleSetVolume);
+  server.on("/api/restart", HTTP_POST, handleRestart);
+  server.on("/api/ota", HTTP_POST, handleOtaCheck);
+}
+
+void retrySavedWifi() {
+  if (!hasSavedWifi || WiFi.status() == WL_CONNECTED) return;
+  Serial.printf("[WiFi] Retrying saved network: %s\n", savedSsid.c_str());
+  // Do not rewrite flash on every retry — credentials are already stored.
+  WiFi.persistent(false);
+  WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+}
+
+void leavePortalForSavedWifi() {
+  Serial.printf("[WiFi] Saved network is up: %s  IP %s\n",
+                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  delay(50);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  isAPMode = false;
+  digitalWrite(READY_PIN, LOW);
+  lastSeenSSID = WiFi.SSID();
+  registerControlRoutes();
+  MDNS.end();
+  if (MDNS.begin("myathan")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS: http://myathan.local");
+  }
+}
+
 // =====================================================
 // SETUP
 // =====================================================
@@ -1246,7 +1303,7 @@ void setup() {
 
   delay(1500);
   Serial.flush();
-  Serial.println("\n\n--- MyAthan v2.1 ---");
+  Serial.printf("\n\n--- MyAthan v%s ---\n", FW_VERSION);
 
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.setAutoReconnect(true);
@@ -1284,6 +1341,13 @@ void setup() {
   }
   Serial.println();
 
+  savedSsid = WiFi.SSID();
+  savedPass = WiFi.psk();
+  hasSavedWifi = savedSsid.length() > 0;
+  if (hasSavedWifi) {
+    Serial.printf("[WiFi] Saved network: %s\n", savedSsid.c_str());
+  }
+
   if (WiFi.status() != WL_CONNECTED) {
     isAPMode = true;
     Serial.println("WiFi Failed. Starting SoftAP + Station...");
@@ -1295,6 +1359,13 @@ void setup() {
 
     Serial.print("Access Point Started: ");
     Serial.println(AP_SSID);
+
+    // Switching to AP_STA aborts the first STA attempt — start it again so we
+    // keep using the saved router until the portal writes new credentials.
+    if (hasSavedWifi) {
+      lastWifiRetry = millis();
+      retrySavedWifi();
+    }
 
     dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
     dnsServer.start(53, "*", apIP);
@@ -1320,18 +1391,7 @@ void setup() {
     lastSeenSSID = WiFi.SSID();
 
     server.on("/", serveControlPage);
-    server.on("/play", handlePlay);
-    server.on("/stop", handleStop);
-    server.on("/status", handleStatus);
-    server.on("/api/status", handleApiStatus);
-    server.on("/api/location", HTTP_POST, handleSetLocation);
-    server.on("/api/auto", HTTP_POST, handleSetAuto);
-    server.on("/api/settings", HTTP_POST, handleSetSettings);
-    server.on("/api/tune", HTTP_POST, handleSetTune);
-    server.on("/api/sync", HTTP_POST, handleManualSync);
-    server.on("/api/volume", HTTP_POST, handleSetVolume);
-    server.on("/api/restart", HTTP_POST, handleRestart);
-    server.on("/api/ota", HTTP_POST, handleOtaCheck);
+    registerControlRoutes();
     server.begin();
     if (MDNS.begin("myathan")) {
       MDNS.addService("http", "tcp", 80);
@@ -1348,8 +1408,17 @@ void loop() {
     dnsServer.processNextRequest();
     server.handleClient();
 
+    if (hasSavedWifi) {
+      if (WiFi.status() == WL_CONNECTED && WiFi.localIP()) {
+        leavePortalForSavedWifi();
+      } else if (millis() - lastWifiRetry >= WIFI_RETRY_INTERVAL_MS) {
+        lastWifiRetry = millis();
+        retrySavedWifi();
+      }
+    }
+
     static unsigned long lastBlink = 0;
-    if (millis() - lastBlink > 200) {
+    if (isAPMode && millis() - lastBlink > 200) {
       lastBlink = millis();
       digitalWrite(READY_PIN, !digitalRead(READY_PIN));
     }
@@ -1554,13 +1623,14 @@ void loop() {
     }
   }
 
-  // === PERSISTENT Reconnect Check (Every 60s) ===
+  // === PERSISTENT Reconnect Check (Every 60s, STA mode) ===
   static unsigned long lastRecon = 0;
-  if (millis() - lastRecon > 60000) {
+  if (!isAPMode && millis() - lastRecon > 60000) {
     lastRecon = millis();
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("Connection Lost/Not Found. Retrying...");
-      WiFi.begin();
+      if (hasSavedWifi) retrySavedWifi();
+      else WiFi.begin();
     }
   }
 }
