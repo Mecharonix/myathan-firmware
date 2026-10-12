@@ -6,6 +6,9 @@
  * - LED / Relay (+)    ->  ESP8266 D8 (GPIO 15)
  * - Volume UP Button   ->  ESP8266 D6 (GPIO 12)
  * - Volume DOWN Button ->  ESP8266 D7 (GPIO 13)
+ *
+ * Build FQBN (must match CI):
+ *   esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=basic
  */
 
 #include <Arduino.h>
@@ -21,6 +24,7 @@
 #include <WiFiClientSecure.h>
 #include <time.h>
 #include <ESP8266httpUpdate.h>
+#include "web_pages_gz.h"
 
 // --- Configuration ---
 const char *AP_SSID = "MyAthan Setup";
@@ -34,7 +38,7 @@ DNSServer dnsServer;
 // Bump FW_VERSION on every release; the CI publishes it to version.txt and the
 // device compares against it. URLs point at a fixed pre-release tag so the
 // ESP8266 never picks up the repo's ESP32-C3 releases.
-#define FW_VERSION "2.2.6"
+#define FW_VERSION "2.2.7"
 // Daily automatic OTA check, deliberately offset from the 00:00 prayer refresh so they never collide
 #define OTA_CHECK_HOUR 0
 #define OTA_CHECK_MIN  30
@@ -63,16 +67,16 @@ String otaStatus = "Idle";
 #define MAGIC1 0xCA
 #define MAGIC2 0xFE
 
-// Keep retrying a saved STA network while the setup portal is up (power-loss:
-// device often boots before the router). Stop only when the portal saves new
-// credentials (handleSave restarts) or the saved network comes back.
+// Wait 15s for saved STA, then open the portal. Keep retrying that same
+// SSID/password during the portal until STA connects or /save writes new creds.
+#define WIFI_PORTAL_DELAY_MS   15000
 #define WIFI_RETRY_INTERVAL_MS 15000
 
 // --- State ---
 bool isAPMode = false;
 bool hasSavedWifi = false;
-String savedSsid;
-String savedPass;
+char savedSsid[33];
+char savedPass[65];
 unsigned long lastWifiRetry = 0;
 bool firstSync = true;
 float myLat = 0.0, myLon = 0.0;
@@ -212,47 +216,13 @@ String jsonEscape(const String &s) {
   return out;
 }
 
-// =====================================================
-// SETUP PAGE (AP mode) - unchanged design
-// =====================================================
-void serveSetupPage() {
+void sendGzipPage(const uint8_t *data, size_t len) {
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-
-  String html = "<!DOCTYPE html><html><head><meta name='viewport' "
-                "content='width=device-width, initial-scale=1'>";
-  html += "<title>MyAthan Setup</title>";
-  html += "<style>";
-  html += "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', "
-          "Roboto, Helvetica, Arial, sans-serif; background: #f0f2f5; display: "
-          "flex; align-items: center; justify-content: center; height: 100vh; "
-          "margin: 0; }";
-  html += ".card { background: white; padding: 2rem; border-radius: 12px; "
-          "box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 100%; max-width: 320px; }";
-  html += "h1 { color: #1a1a1a; margin-top: 0; font-size: 24px; text-align: center; }";
-  html += "input { width: 100%; padding: 12px; margin: 8px 0; display: "
-          "inline-block; border: 1px solid #ccc; border-radius: 4px; "
-          "box-sizing: border-box; font-size: 16px; }";
-  html += "input[type=submit] { width: 100%; background-color: #4CAF50; color: "
-          "white; padding: 14px 20px; margin: 8px 0; border: none; border-radius: "
-          "4px; cursor: pointer; font-size: 16px; font-weight: bold; }";
-  html += "input[type=submit]:hover { background-color: #45a049; }";
-  html += ".label { font-weight: bold; color: #555; display: block; margin-top: 10px; }";
-  html += "</style></head><body>";
-
-  html += "<div class='card'>";
-  html += "<h1>Enter your WiFi credentials</h1>";
-  html += "<form method='POST' action='/save'>";
-  html += "<label class='label'>WiFi Name (SSID)</label>";
-  html += "<input type='text' name='ssid' placeholder='Enter SSID'>";
-  html += "<label class='label'>Password</label>";
-  html += "<input type='text' name='pass' placeholder='Enter Password'>";
-  html += "<input type='submit' value='Connect'>";
-  html += "</form></div>";
-  html += "</body></html>";
-  server.send(200, "text/html", html);
+  server.sendHeader("Content-Encoding", "gzip");
+  server.send_P(200, "text/html", (PGM_P)data, len);
 }
+void serveSetupPage() { sendGzipPage(SETUP_HTML_GZ, SETUP_HTML_GZ_LEN); }
+void serveControlPage() { sendGzipPage(CONTROL_HTML_GZ, CONTROL_HTML_GZ_LEN); }
 
 boolean handleCaptivePortal() {
   String host = server.hostHeader();
@@ -311,445 +281,6 @@ void handleSave() {
 
 void handleNotFound() { handleRoot(); }
 
-// =====================================================
-// CONTROL PAGE (STA mode) - new UI with map
-// =====================================================
-const char CONTROL_PAGE[] PROGMEM = R"=====(<!DOCTYPE html>
-<html lang='en'><head>
-<meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
-<meta charset='utf-8'>
-<title>MyAthan</title>
-<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css' crossorigin=''>
-<style>
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(160deg,#0f6651 0%,#1a4d3a 100%);min-height:100vh;color:#1a1a1a;padding-bottom:24px}
-.app{max-width:620px;margin:0 auto;padding:16px}
-.header{display:flex;align-items:center;justify-content:space-between;padding:18px 6px 14px;color:#fff}
-.header h1{margin:0;font-size:24px;font-weight:700;letter-spacing:.5px}
-.header .sub{font-size:11px;opacity:.7;letter-spacing:2px;text-transform:uppercase}
-.badge{font-size:12px;padding:6px 12px;border-radius:14px;font-weight:600;display:inline-flex;align-items:center;gap:6px}
-.badge.ok{background:rgba(39,174,96,.95);color:#fff}
-.badge.bad{background:rgba(231,76,60,.95);color:#fff}
-.badge.warn{background:rgba(243,156,18,.95);color:#fff}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-.dot.ok{background:#fff;box-shadow:0 0 0 0 rgba(255,255,255,.7);animation:pulse 2s infinite}
-.dot.bad{background:#fff}
-.dot.warn{background:#fff}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.5)}70%{box-shadow:0 0 0 8px rgba(255,255,255,0)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
-.card{background:#fff;border-radius:16px;padding:18px;margin-bottom:14px;box-shadow:0 6px 20px rgba(0,0,0,.15)}
-.card h2{margin:0 0 14px;font-size:13px;color:#7c8a99;text-transform:uppercase;letter-spacing:1.5px;font-weight:700}
-.row{display:flex;gap:10px;margin:10px 0}
-.row>*{flex:1;min-width:0}
-button{padding:14px;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;width:100%;transition:transform .1s,opacity .2s;font-family:inherit}
-button:active{transform:scale(.97)}
-button:disabled{opacity:.5;cursor:not-allowed}
-.btn-play{background:#27ae60;color:#fff}
-.btn-stop{background:#e74c3c;color:#fff}
-.btn-save{background:#2c7be5;color:#fff;margin-top:10px}
-.btn-auto{background:#7f8c8d;color:#fff;margin-top:8px}
-.btn-sync{background:#34495e;color:#fff;margin-top:10px;font-size:13px;padding:10px}
-.btn-restart{background:#f39c12;color:#fff}
-input[type=text],input[type=number]{padding:12px;border:1px solid #dfe4ea;border-radius:10px;font-size:14px;width:100%;font-family:inherit}
-select{padding:12px;border:1px solid #dfe4ea;border-radius:10px;font-size:14px;width:100%;font-family:inherit;background:#fff;-webkit-appearance:menulist}
-input.tune{width:66px;flex:0 0 auto;padding:7px 6px;text-align:center;font-size:13px;border:1px solid #dfe4ea;border-radius:8px;font-family:inherit}
-.ptright{display:flex;align-items:center;gap:10px}
-input[type=range]{width:100%;margin:6px 0;accent-color:#0f6651}
-.status-line{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #f0f2f5;font-size:14px}
-.status-line:last-child{border-bottom:0}
-.status-line b{color:#7c8a99;font-weight:500}
-.status-line span{color:#1a1a1a;font-weight:600;text-align:right;word-break:break-all}
-#map{height:300px;border-radius:12px;border:1px solid #dfe4ea;margin:10px 0;overflow:hidden;background:#f0f2f5}
-.ptime{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-radius:10px;margin:6px 0;background:#f7f9fa;font-size:15px}
-.ptime.next{background:linear-gradient(90deg,#e8f5e9,#f0fff4);border-left:4px solid #27ae60}
-.ptime.next .pn{color:#0f6651}
-.ptime.next .pt{color:#0f6651}
-.ptime .pn{font-weight:600;color:#333}
-.ptime .pt{font-family:'SF Mono','Menlo','Consolas',monospace;color:#1a4d3a;font-weight:700}
-.ptime .nx{font-size:10px;font-weight:700;color:#27ae60;background:rgba(39,174,96,.15);padding:3px 8px;border-radius:6px;margin-left:8px}
-.hint{font-size:13px;color:#7c8a99;margin:4px 0 10px}
-.lbl{font-size:13px;color:#555;font-weight:500;display:block;margin:10px 0 4px}
-.lbl b{color:#0f6651;font-weight:700;float:right}
-.mode-pill{display:inline-block;padding:3px 10px;border-radius:10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
-.mode-pill.auto{background:#e3f2fd;color:#1565c0}
-.mode-pill.manual{background:#fff3e0;color:#e65100}
-</style></head>
-<body>
-<div class='app'>
-<div class='header'>
-  <div>
-    <div class='sub'>Prayer Reminder</div>
-    <h1>MyAthan</h1>
-  </div>
-  <span id='wifi-badge' class='badge warn'><span class='dot warn'></span>Loading</span>
-</div>
-
-<div class='card'>
-<h2>Player</h2>
-<div class='status-line'><b>Current Status</b><span id='play-status'>...</span></div>
-<div style='margin-top:12px'>
-<div class='row' style='margin:0 0 14px'>
-<button class='btn-play' onclick="cmd('/play')">&#9658; Play Athan</button>
-<button class='btn-stop' onclick="cmd('/stop')">&#9632; Stop Athan</button>
-</div>
-<label class='lbl'>Volume <b id='vol-display'>--%</b></label>
-<input type='range' id='vol-in' min='0' max='100' step='1' value='66'>
-</div>
-</div>
-
-<div class='card'>
-<h2>Prayer Times Today</h2>
-<div id='prayers'>Loading...</div>
-<div id='tune-actions' style='display:none;margin-top:6px'>
-<p class='hint'>The box next to each prayer shifts that time by the given number of minutes (negative = earlier). It applies to both the shown time and the athan trigger.</p>
-<button class='btn-save' onclick='saveTune()'>Save Time Adjustments</button>
-</div>
-</div>
-
-<div class='card'>
-<h2>Calculation Settings</h2>
-<p class='hint'>Match these to your phone app so the device agrees with it. Quran Majeed uses <b>Umm al-Qura</b>. The high-latitude rule mainly changes Fajr &amp; Isha at northern latitudes (e.g. Germany).</p>
-<label class='lbl'>Calculation Method</label>
-<select id='method-in'>
-<option value='4'>Umm al-Qura University, Makkah</option>
-<option value='3'>Muslim World League</option>
-<option value='2'>ISNA (North America)</option>
-<option value='5'>Egyptian General Authority</option>
-<option value='1'>Univ. of Islamic Sciences, Karachi</option>
-<option value='7'>Univ. of Tehran (Geophysics)</option>
-<option value='8'>Gulf Region</option>
-<option value='9'>Kuwait</option>
-<option value='10'>Qatar</option>
-<option value='11'>Singapore (MUIS)</option>
-<option value='12'>France (UOIF)</option>
-<option value='13'>Diyanet, Turkey</option>
-<option value='16'>Dubai</option>
-<option value='17'>Malaysia (JAKIM)</option>
-<option value='18'>Tunisia</option>
-<option value='19'>Algeria</option>
-<option value='20'>Indonesia (Kemenag)</option>
-<option value='21'>Morocco</option>
-<option value='22'>Lisbon, Portugal</option>
-<option value='23'>Jordan</option>
-<option value='15'>Moonsighting Committee</option>
-<option value='14'>Russia (Spiritual Admin)</option>
-<option value='0'>Shia Ithna-Ashari (Jafari)</option>
-</select>
-<label class='lbl'>Asr (Juristic) Method</label>
-<select id='school-in'>
-<option value='0'>Standard (Shafi / Maliki / Hanbali)</option>
-<option value='1'>Hanafi</option>
-</select>
-<label class='lbl'>High-Latitude Rule</label>
-<select id='latadj-in'>
-<option value='0'>None / API default</option>
-<option value='1'>Middle of the Night</option>
-<option value='2'>One-Seventh of the Night</option>
-<option value='3'>Angle Based</option>
-</select>
-<label class='lbl' style='margin-top:14px'><input type='checkbox' id='autotz-in' onchange='toggleTz()' style='width:auto;margin-right:8px;vertical-align:middle'>Automatic timezone (recommended)</label>
-<p class='hint'>When on, the UTC offset including daylight saving is taken from your location automatically, so the athan always fires on time. Turn it off only to force a manual offset below.</p>
-<button class='btn-save' onclick='saveSettings()'>Save Calculation Settings</button>
-</div>
-
-<div class='card'>
-<h2>Current Location</h2>
-<div class='status-line'><b>Mode</b><span id='mode'>--</span></div>
-<div class='status-line'><b>Latitude</b><span id='lat'>--</span></div>
-<div class='status-line'><b>Longitude</b><span id='lon'>--</span></div>
-<div class='status-line'><b>UTC Offset</b><span id='offset'>--</span></div>
-<div class='status-line'><b>Last Sync</b><span id='lsync'>Never</span></div>
-<div class='status-line'><b>Sync Status</b><span id='sstatus'>--</span></div>
-<button class='btn-sync' onclick='triggerSync()'>&#x21bb; Re-sync Now</button>
-</div>
-
-<div class='card'>
-<h2>Network</h2>
-<div class='status-line'><b>SSID</b><span id='ssid'>--</span></div>
-<div class='status-line'><b>IP Address</b><span id='ip'>--</span></div>
-<div class='status-line'><b>Signal</b><span id='rssi'>--</span></div>
-</div>
-
-<div class='card'>
-<h2>Manual Location</h2>
-<p class='hint'>Tap anywhere on the map to set your prayer location, or type coordinates directly. With <b>Automatic timezone</b> on (above), the UTC offset is set from your location for you &mdash; the slider below is only used when you turn that off.</p>
-<div id='map'></div>
-<div class='row'>
-<div><label class='lbl'>Latitude</label><input type='number' id='lat-in' placeholder='e.g. 41.0082' step='0.0001'></div>
-<div><label class='lbl'>Longitude</label><input type='number' id='lon-in' placeholder='e.g. 28.9784' step='0.0001'></div>
-</div>
-<label class='lbl'>UTC Offset <b id='offset-display'>UTC+00:00</b></label>
-<input type='range' id='offset-in' min='-12' max='14' step='0.25' value='0'>
-<button class='btn-save' onclick='saveLoc()'>Save Manual Location</button>
-<button class='btn-auto' onclick='setAuto()'>Switch to Automatic Detection</button>
-</div>
-
-<div class='card'>
-<h2>Device</h2>
-<div class='status-line'><b>Firmware</b><span id='fw'>--</span></div>
-<div class='status-line'><b>Update</b><span id='ota'>--</span></div>
-<p class='hint'>Check GitHub for newer firmware and install it over the air. The device downloads, flashes and reboots (~1 min) &mdash; keep it powered.</p>
-<button class='btn-sync' onclick='checkUpdate()'>&#x2b06; Check for Updates</button>
-<p class='hint' style='margin-top:14px'>Restart the ESP8266. Prayer triggers will pause for a few seconds while it boots.</p>
-<button class='btn-restart' onclick='doRestart()'>&#x21bb; Restart Device</button>
-</div>
-
-</div>
-
-<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js' crossorigin=''></script>
-<script>
-var map = L.map('map', {zoomControl:true}).setView([20,10], 2);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap',maxZoom:18}).addTo(map);
-var marker = null;
-var mapInitialized = false;
-var settingsLoaded = false;
-var prayersBuilt = false;
-
-function saveTune(){
-  var parts = [];
-  for (var i=0;i<5;i++){
-    var v = parseInt(document.getElementById('tune-'+i).value, 10);
-    if (isNaN(v)) v = 0;
-    parts.push('t'+i+'='+v);
-  }
-  fetch('/api/tune',{
-    method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body: parts.join('&')
-  }).then(function(r){
-    if (r.ok){ alert('Time adjustments saved. Re-fetching prayer times...'); setTimeout(refresh,2200); }
-    else r.text().then(function(t){ alert('Error: ' + t); });
-  });
-}
-
-function toggleTz(){
-  document.getElementById('offset-in').disabled = document.getElementById('autotz-in').checked;
-}
-
-function saveSettings(){
-  var body = 'method=' + document.getElementById('method-in').value
-    + '&school=' + document.getElementById('school-in').value
-    + '&latadj=' + document.getElementById('latadj-in').value
-    + '&autotz=' + (document.getElementById('autotz-in').checked ? 1 : 0);
-  fetch('/api/settings',{
-    method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body: body
-  }).then(function(r){
-    if (r.ok){ alert('Calculation settings saved. Re-fetching prayer times...'); setTimeout(refresh,2200); }
-    else r.text().then(function(t){ alert('Error: ' + t); });
-  });
-}
-
-map.on('click', function(e){ setMarker(e.latlng.lat, e.latlng.lng, true); });
-
-function setMarker(lat, lon, autoOffset){
-  if (marker) marker.remove();
-  marker = L.marker([lat,lon]).addTo(map);
-  document.getElementById('lat-in').value = lat.toFixed(4);
-  document.getElementById('lon-in').value = lon.toFixed(4);
-  if (autoOffset){
-    var oh = Math.round(lon/15);
-    if (oh < -12) oh = -12; if (oh > 14) oh = 14;
-    document.getElementById('offset-in').value = oh;
-    updateOffsetDisplay();
-  }
-}
-
-function fmtOffset(v){
-  var s = v >= 0 ? '+' : '-';
-  var a = Math.abs(v);
-  var h = Math.floor(a);
-  var m = Math.round((a-h)*60);
-  return 'UTC' + s + String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
-}
-function updateOffsetDisplay(){
-  document.getElementById('offset-display').textContent = fmtOffset(parseFloat(document.getElementById('offset-in').value));
-}
-document.getElementById('offset-in').addEventListener('input', updateOffsetDisplay);
-
-function cmd(u){ fetch(u).then(function(){ setTimeout(refresh,250); }); }
-function triggerSync(){
-  fetch('/api/sync',{method:'POST'}).then(function(){
-    var b = document.getElementById('sstatus');
-    b.textContent = 'Syncing...';
-    setTimeout(refresh, 2500);
-  });
-}
-
-var volSlider = document.getElementById('vol-in');
-var volDisplay = document.getElementById('vol-display');
-var volUserActive = false;
-volSlider.addEventListener('input', function(){
-  volUserActive = true;
-  volDisplay.textContent = this.value + '%';
-});
-volSlider.addEventListener('change', function(){
-  fetch('/api/volume', {
-    method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body: 'vol=' + encodeURIComponent(this.value)
-  }).finally(function(){
-    setTimeout(function(){ volUserActive = false; }, 800);
-  });
-});
-
-function doRestart(){
-  if (!confirm('Restart the device now? It will be offline for ~5 seconds.')) return;
-  fetch('/api/restart', {method:'POST'}).catch(function(){});
-  var b = document.getElementById('wifi-badge');
-  b.className = 'badge warn';
-  b.innerHTML = '<span class="dot warn"></span>Restarting...';
-  setTimeout(function(){ location.reload(); }, 8000);
-}
-
-function checkUpdate(){
-  var o = document.getElementById('ota');
-  if (o) o.textContent = 'Checking...';
-  fetch('/api/ota',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'apply=0'})
-    .then(function(r){ return r.text(); })
-    .then(function(t){
-      if (o) o.textContent = t;
-      if (t.indexOf('Update available') === 0){
-        if (confirm(t + '\n\nInstall now? The device will download, flash and reboot (~1 minute). Keep it powered.')){
-          if (o) o.textContent = 'Updating... device will reboot';
-          var b = document.getElementById('wifi-badge');
-          b.className = 'badge warn';
-          b.innerHTML = '<span class="dot warn"></span>Updating...';
-          fetch('/api/ota',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'apply=1'}).catch(function(){});
-          setTimeout(function(){ location.reload(); }, 60000);
-        }
-      } else {
-        alert(t);
-      }
-    })
-    .catch(function(){ if (o) o.textContent = 'Check failed'; alert('Update check failed'); });
-}
-
-function saveLoc(){
-  var lat = document.getElementById('lat-in').value;
-  var lon = document.getElementById('lon-in').value;
-  var off = Math.round(parseFloat(document.getElementById('offset-in').value) * 3600);
-  if (lat === '' || lon === ''){ alert('Please select a location on the map first.'); return; }
-  fetch('/api/location', {
-    method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body: 'lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon)+'&offset='+encodeURIComponent(off)
-  }).then(function(r){
-    if (r.ok){ alert('Manual location saved. Refreshing prayer times...'); setTimeout(refresh,1800); }
-    else r.text().then(function(t){ alert('Error: ' + t); });
-  });
-}
-
-function setAuto(){
-  if (!confirm('Switch to automatic location detection? The device will use its public IP to find your location.')) return;
-  fetch('/api/auto', {method:'POST'}).then(function(r){
-    if (r.ok){ alert('Switched to automatic. Re-detecting location...'); setTimeout(refresh,1800); }
-  });
-}
-
-function refresh(){
-  fetch('/api/status').then(function(r){ return r.json(); }).then(function(s){
-    var b = document.getElementById('wifi-badge');
-    if (s.connected){ b.className='badge ok'; b.innerHTML='<span class="dot ok"></span>Connected'; }
-    else { b.className='badge bad'; b.innerHTML='<span class="dot bad"></span>Offline'; }
-
-    document.getElementById('play-status').textContent = s.playing ? 'Playing' : 'Idle';
-    if (!volUserActive && typeof s.volume === 'number') {
-      var pct = Math.round((s.volume / 30) * 100);
-      volSlider.value = pct;
-      volDisplay.textContent = pct + '%';
-    }
-    document.getElementById('ssid').textContent = s.ssid || '--';
-    document.getElementById('ip').textContent = s.ip || '--';
-    document.getElementById('rssi').textContent = s.rssi ? (s.rssi + ' dBm') : '--';
-
-    var ml = document.getElementById('mode');
-    ml.innerHTML = s.manual
-      ? '<span class="mode-pill manual">Manual</span>'
-      : '<span class="mode-pill auto">Automatic</span>';
-    document.getElementById('lat').textContent = (s.lat).toFixed(4);
-    document.getElementById('lon').textContent = (s.lon).toFixed(4);
-    document.getElementById('offset').textContent = fmtOffset(s.offset/3600);
-    document.getElementById('lsync').textContent = s.lastSync || 'Never';
-    document.getElementById('sstatus').textContent = s.syncStatus || '--';
-    var fwEl = document.getElementById('fw'); if (fwEl) fwEl.textContent = s.fw || '--';
-    var otaEl = document.getElementById('ota'); if (otaEl) otaEl.textContent = s.ota || '--';
-
-    if (!settingsLoaded && typeof s.method === 'number'){
-      document.getElementById('method-in').value = String(s.method);
-      document.getElementById('school-in').value = String(s.school);
-      document.getElementById('latadj-in').value = String(s.latadj);
-      document.getElementById('autotz-in').checked = (s.autotz == 1);
-      toggleTz();
-      settingsLoaded = true;
-    }
-
-    var now = s.nowMin;
-    var nextIdx = -1, minDiff = 99999;
-    if (s.prayers && s.prayers.length){
-      for (var i=0;i<s.prayers.length;i++){
-        var pm = s.prayers[i].hour*60 + s.prayers[i].minute;
-        var d = pm - now; if (d <= 0) d += 1440;
-        if (d < minDiff){ minDiff = d; nextIdx = i; }
-      }
-      // Build the rows (with persistent tune inputs) only once, so the 3s
-      // auto-refresh never wipes a value the user is typing.
-      if (!prayersBuilt){
-        var ph = '';
-        for (var i=0;i<s.prayers.length;i++){
-          ph += '<div class="ptime" id="prow-'+i+'">'
-            + '<span class="pn" id="pn-'+i+'"></span>'
-            + '<span class="ptright">'
-            + '<span class="pt" id="pt-'+i+'"></span>'
-            + '<input type="number" class="tune" id="tune-'+i+'" step="1" value="0" title="minutes offset">'
-            + '</span></div>';
-        }
-        document.getElementById('prayers').innerHTML = ph;
-        if (s.tune){
-          for (var i=0;i<s.tune.length && i<5;i++)
-            document.getElementById('tune-'+i).value = s.tune[i];
-        }
-        document.getElementById('tune-actions').style.display = 'block';
-        prayersBuilt = true;
-      }
-      for (var i=0;i<s.prayers.length;i++){
-        var p = s.prayers[i];
-        var t = String(p.hour).padStart(2,'0') + ':' + String(p.minute).padStart(2,'0');
-        document.getElementById('pt-'+i).textContent = t;
-        document.getElementById('pn-'+i).innerHTML = p.name + (i===nextIdx?' <span class="nx">NEXT</span>':'');
-        var row = document.getElementById('prow-'+i);
-        if (i===nextIdx) row.classList.add('next'); else row.classList.remove('next');
-      }
-    } else if (!prayersBuilt){
-      document.getElementById('prayers').innerHTML = '<div class="hint">No prayer data yet. Waiting for first sync...</div>';
-    }
-
-    if (!mapInitialized && (s.lat !== 0 || s.lon !== 0)){
-      map.setView([s.lat, s.lon], 10);
-      setMarker(s.lat, s.lon, false);
-      document.getElementById('offset-in').value = (s.offset/3600);
-      updateOffsetDisplay();
-      mapInitialized = true;
-    }
-  }).catch(function(){
-    var b = document.getElementById('wifi-badge');
-    b.className='badge bad';
-    b.innerHTML='<span class="dot bad"></span>No response';
-  });
-}
-
-updateOffsetDisplay();
-refresh();
-setInterval(refresh, 3000);
-setTimeout(function(){ map.invalidateSize(); }, 400);
-</script>
-</body></html>
-)=====";
-
-void serveControlPage() {
-  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  server.send_P(200, "text/html", CONTROL_PAGE);
-}
 
 // =====================================================
 // API Handlers
@@ -1267,20 +798,44 @@ void registerControlRoutes() {
   server.on("/api/ota", HTTP_POST, handleOtaCheck);
 }
 
+void rememberSavedWifi() {
+  strncpy(savedSsid, WiFi.SSID().c_str(), sizeof(savedSsid) - 1);
+  savedSsid[sizeof(savedSsid) - 1] = 0;
+  strncpy(savedPass, WiFi.psk().c_str(), sizeof(savedPass) - 1);
+  savedPass[sizeof(savedPass) - 1] = 0;
+  hasSavedWifi = savedSsid[0] != 0;
+}
+
 void retrySavedWifi() {
   if (!hasSavedWifi || WiFi.status() == WL_CONNECTED) return;
-  Serial.printf("[WiFi] Retrying saved network: %s\n", savedSsid.c_str());
-  // Do not rewrite flash on every retry — credentials are already stored.
+
+  // ESP8266 radio is one channel: SoftAP and STA must match. If the portal
+  // stayed on channel 1, a router on another channel would never be seen.
+  int ch = 0;
+  int n = WiFi.scanNetworks(false, true);
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == savedSsid) {
+      ch = WiFi.channel(i);
+      break;
+    }
+  }
+  WiFi.scanDelete();
+
   WiFi.persistent(false);
-  WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+  if (ch > 0) {
+    Serial.printf("[WiFi] Retry %s on ch %d\n", savedSsid, ch);
+    WiFi.softAP(AP_SSID, NULL, ch, 0, 4);
+  } else {
+    Serial.printf("[WiFi] Retry %s (not in scan yet)\n", savedSsid);
+  }
+  WiFi.begin(savedSsid, savedPass);
 }
 
 void leavePortalForSavedWifi() {
-  Serial.printf("[WiFi] Saved network is up: %s  IP %s\n",
-                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  Serial.print("[WiFi] Saved network is up. IP ");
+  Serial.println(WiFi.localIP());
   dnsServer.stop();
   WiFi.softAPdisconnect(true);
-  delay(50);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   isAPMode = false;
@@ -1288,10 +843,7 @@ void leavePortalForSavedWifi() {
   lastSeenSSID = WiFi.SSID();
   registerControlRoutes();
   MDNS.end();
-  if (MDNS.begin("myathan")) {
-    MDNS.addService("http", "tcp", 80);
-    Serial.println("mDNS: http://myathan.local");
-  }
+  if (MDNS.begin("myathan")) MDNS.addService("http", "tcp", 80);
 }
 
 // =====================================================
@@ -1306,7 +858,7 @@ void setup() {
   Serial.printf("\n\n--- MyAthan v%s ---\n", FW_VERSION);
 
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
-  WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(false);
   WiFi.hostname("MyAthan");
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
@@ -1330,23 +882,17 @@ void setup() {
 
   Serial.print("Connecting to WiFi");
   WiFi.begin();
-  int retries = 0;
-  while (WiFi.status() != WL_CONNECTED && retries < 15) {
+  unsigned long waitStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - waitStart < WIFI_PORTAL_DELAY_MS) {
     digitalWrite(READY_PIN, HIGH);
     delay(100);
     digitalWrite(READY_PIN, LOW);
     delay(400);
     Serial.print(".");
-    retries++;
   }
   Serial.println();
 
-  savedSsid = WiFi.SSID();
-  savedPass = WiFi.psk();
-  hasSavedWifi = savedSsid.length() > 0;
-  if (hasSavedWifi) {
-    Serial.printf("[WiFi] Saved network: %s\n", savedSsid.c_str());
-  }
+  rememberSavedWifi();
 
   if (WiFi.status() != WL_CONNECTED) {
     isAPMode = true;
@@ -1360,8 +906,6 @@ void setup() {
     Serial.print("Access Point Started: ");
     Serial.println(AP_SSID);
 
-    // Switching to AP_STA aborts the first STA attempt — start it again so we
-    // keep using the saved router until the portal writes new credentials.
     if (hasSavedWifi) {
       lastWifiRetry = millis();
       retrySavedWifi();
@@ -1389,6 +933,7 @@ void setup() {
     digitalWrite(READY_PIN, LOW);
 
     lastSeenSSID = WiFi.SSID();
+    WiFi.setAutoReconnect(true);
 
     server.on("/", serveControlPage);
     registerControlRoutes();
@@ -1409,7 +954,7 @@ void loop() {
     server.handleClient();
 
     if (hasSavedWifi) {
-      if (WiFi.status() == WL_CONNECTED && WiFi.localIP()) {
+      if (WiFi.status() == WL_CONNECTED) {
         leavePortalForSavedWifi();
       } else if (millis() - lastWifiRetry >= WIFI_RETRY_INTERVAL_MS) {
         lastWifiRetry = millis();
@@ -1623,14 +1168,4 @@ void loop() {
     }
   }
 
-  // === PERSISTENT Reconnect Check (Every 60s, STA mode) ===
-  static unsigned long lastRecon = 0;
-  if (!isAPMode && millis() - lastRecon > 60000) {
-    lastRecon = millis();
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Connection Lost/Not Found. Retrying...");
-      if (hasSavedWifi) retrySavedWifi();
-      else WiFi.begin();
-    }
-  }
 }
