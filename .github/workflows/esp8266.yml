@@ -31,16 +31,10 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp8266:esp8266@3.1.2
 
-      - name: Pack gzip web pages
-        run: python3 esp8266/MyAthan_OTA/pack_web.py
-
       - name: Compile firmware
         run: |
-          # 4M2M: ~1MB OTA slot after this image is installed (was easy to
-          # land on 4M3M / ~512KB OTA in the Arduino IDE). ssl=basic trims
-          # BearSSL so this build still fits in a tight 4M3M leftover slot.
           arduino-cli compile \
-            --fqbn esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=basic \
+            --fqbn esp8266:esp8266:nodemcuv2 \
             --libraries esp8266/libraries \
             --output-dir build \
             esp8266/MyAthan_OTA
