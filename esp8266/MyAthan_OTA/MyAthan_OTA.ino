@@ -9,6 +9,10 @@
  *
  * Build FQBN (must match CI):
  *   esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=basic
+ *
+ * 2.2.8 is a bridge: 15-minute OTA checks + extra failsafes so a fleet can
+ * move off a too-tight flash layout without USB. 2.2.9 restores the full UI
+ * (control_full.html) and the daily 00:30 OTA window.
  */
 
 #include <Arduino.h>
@@ -17,7 +21,6 @@
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
 #include <JQ6500_Serial.h>
 #include <SoftwareSerial.h>
 #include <WiFiClient.h>
@@ -38,14 +41,24 @@ DNSServer dnsServer;
 // Bump FW_VERSION on every release; the CI publishes it to version.txt and the
 // device compares against it. URLs point at a fixed pre-release tag so the
 // ESP8266 never picks up the repo's ESP32-C3 releases.
-#define FW_VERSION "2.2.7"
-// Daily automatic OTA check, deliberately offset from the 00:00 prayer refresh so they never collide
-#define OTA_CHECK_HOUR 0
-#define OTA_CHECK_MIN  30
+#define FW_VERSION "2.2.8"
+// 2.2.8 bridge: poll GitHub often so a follow-up 2.2.9 can land the same day.
+// 2.2.9 should restore OTA_CHECK_HOUR/MIN (00:30) and drop this interval.
+#define OTA_CHECK_INTERVAL_MS (15UL * 60UL * 1000UL)
+#define OTA_MIN_HEAP 14000
+// USB-flash the one test device with this set to 1. Every other unit still
+// reads esp8266-latest (currently 2.2.7) and will not see esp8266-test.
+// MUST be 0 before any fleet push of 2.2.8.
+#define OTA_USE_TEST_CHANNEL 1
+#if OTA_USE_TEST_CHANNEL
+#define OTA_CHANNEL "esp8266-test"
+#else
+#define OTA_CHANNEL "esp8266-latest"
+#endif
 const char *OTA_VERSION_URL =
-    "https://github.com/Mecharonix/myathan-firmware/releases/download/esp8266-latest/version.txt";
+    "https://github.com/Mecharonix/myathan-firmware/releases/download/" OTA_CHANNEL "/version.txt";
 const char *OTA_BIN_URL =
-    "https://github.com/Mecharonix/myathan-firmware/releases/download/esp8266-latest/firmware.bin";
+    "https://github.com/Mecharonix/myathan-firmware/releases/download/" OTA_CHANNEL "/firmware.bin";
 String otaStatus = "Idle";
 
 // --- EEPROM Layout ---
@@ -351,7 +364,10 @@ void handleApiStatus() {
   }
   json += "]";
   json += ",\"fw\":\"" FW_VERSION "\"";
+  json += ",\"otaChannel\":\"" OTA_CHANNEL "\"";
   json += ",\"ota\":\"" + jsonEscape(otaStatus) + "\"";
+  json += ",\"sketch\":" + String(ESP.getSketchSize());
+  json += ",\"freeOta\":" + String(ESP.getFreeSketchSpace());
   json += ",\"lastSync\":\"" + lastSyncStr + "\"";
   json += ",\"syncStatus\":\"" + jsonEscape(lastSyncStatus) + "\"";
   json += ",\"nowMin\":" + String(nowMin);
@@ -669,7 +685,16 @@ bool isNewer(const String &remote, const char *local) {
 // OTA - pull firmware from GitHub Releases
 // =====================================================
 String runOtaCheck(bool applyUpdate) {
-  if (WiFi.status() != WL_CONNECTED) { otaStatus = "No WiFi"; return otaStatus; }
+  if (isAPMode || WiFi.status() != WL_CONNECTED) { otaStatus = "No WiFi"; return otaStatus; }
+  if (isAthanActive) { otaStatus = "Busy (athan)"; return otaStatus; }
+  if (ESP.getFreeHeap() < (int)OTA_MIN_HEAP) {
+    otaStatus = "Low heap, retry later";
+    Serial.printf("[OTA] skip heap=%d\n", ESP.getFreeHeap());
+    return otaStatus;
+  }
+  Serial.printf("[OTA] sketch=%u free=%u heap=%d apply=%d\n",
+                ESP.getSketchSize(), ESP.getFreeSketchSpace(),
+                ESP.getFreeHeap(), applyUpdate);
 
   // Each HTTPS step runs in its own scope so its ~16KB BearSSL buffer is released
   // before the next one - the ESP8266 has only ~24KB free, not enough for two at once.
@@ -731,8 +756,10 @@ String runOtaCheck(bool applyUpdate) {
   t_httpUpdate_return ret = ESPhttpUpdate.update(dc, binUrl);
   if (ret == HTTP_UPDATE_FAILED) {
     otaStatus = "Update failed: " + ESPhttpUpdate.getLastErrorString();
-    Serial.printf("[OTA] FAILED (%d) %s\n",
-                  ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
+    Serial.printf("[OTA] FAILED (%d) %s sketch=%u free=%u heap=%d\n",
+                  ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str(),
+                  ESP.getSketchSize(), ESP.getFreeSketchSpace(), ESP.getFreeHeap());
+    yield();
   } else if (ret == HTTP_UPDATE_NO_UPDATES) {
     otaStatus = "No update";
   }
@@ -842,8 +869,6 @@ void leavePortalForSavedWifi() {
   digitalWrite(READY_PIN, LOW);
   lastSeenSSID = WiFi.SSID();
   registerControlRoutes();
-  MDNS.end();
-  if (MDNS.begin("myathan")) MDNS.addService("http", "tcp", 80);
 }
 
 // =====================================================
@@ -924,7 +949,6 @@ void setup() {
     server.on("/hotspot-detect.html", handleRoot);
     server.onNotFound(handleNotFound);
     server.begin();
-    MDNS.begin("myathan");
   } else {
     Serial.print("Connected! IP: ");
     Serial.println(WiFi.localIP());
@@ -938,10 +962,7 @@ void setup() {
     server.on("/", serveControlPage);
     registerControlRoutes();
     server.begin();
-    if (MDNS.begin("myathan")) {
-      MDNS.addService("http", "tcp", 80);
-      Serial.println("mDNS: http://myathan.local");
-    }
+    Serial.println("http://<device-ip>/  (mDNS off in 2.2.8)");
   }
 }
 
@@ -969,7 +990,6 @@ void loop() {
     }
   } else {
     server.handleClient();
-    MDNS.update();
   }
 
   time_t now = time(nullptr);
@@ -1051,16 +1071,12 @@ void loop() {
     }
   }
 
-  // === DAILY AUTO OTA CHECK (00:30 - offset from the 00:00 prayer refresh) ===
-  // Runs once per day, only when idle (no athan playing) and online. Installs +
-  // reboots automatically if a newer firmware has been published to GitHub.
-  static int lastOtaCheckDay = -1;
-  if (timeinfo->tm_year > 100 && WiFi.status() == WL_CONNECTED && hasFirstSync &&
-      !isAthanActive &&
-      timeinfo->tm_hour == OTA_CHECK_HOUR && timeinfo->tm_min == OTA_CHECK_MIN &&
-      timeinfo->tm_mday != lastOtaCheckDay) {
-    lastOtaCheckDay = timeinfo->tm_mday;  // set first so a failed update won't retry-loop
-    Serial.println("[OTA] Daily auto-check");
+  // === 2.2.8 BRIDGE: OTA every 15 minutes (2.2.9 restores daily 00:30) ===
+  static unsigned long lastOtaPoll = 0;
+  if (!isAPMode && WiFi.status() == WL_CONNECTED && !isAthanActive &&
+      millis() - lastOtaPoll >= OTA_CHECK_INTERVAL_MS) {
+    lastOtaPoll = millis();  // set first so a failed update won't retry-loop
+    Serial.println("[OTA] Periodic auto-check");
     runOtaCheck(true);
   }
 
