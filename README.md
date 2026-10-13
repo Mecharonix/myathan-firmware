@@ -1,9 +1,7 @@
-﻿# MyAthan web flasher (placeholder)
+﻿# MyAthan web flasher
 
-This branch is **only** for a browser USB flasher (ESP Web Tools).
+Chrome / Edge USB installer for ESP8266 MyAthan boxes. Lives only on `esp8266-web-flasher`.
 
-- Do **not** merge this into `main` (ESP32-C3) or `esp8266-ota` (device firmware).
-- Firmware releases stay on `esp8266-ota` / tag `esp8266-latest`.
-- Clone this branch into its own folder, then wait before adding the flasher page.
-
-`git clone -b esp8266-web-flasher https://github.com/Mecharonix/myathan-firmware.git`
+- Do **not** merge this into `main` or `esp8266-ota`.
+- Firmware on this page is a copy of the `esp8266-latest` release (`firmware.bin`).
+- Site: after Pages deploys, open `https://mecharonix.github.io/myathan-firmware/`

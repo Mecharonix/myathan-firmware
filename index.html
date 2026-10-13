@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MyAthan USB flasher</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      --bg: #111613;
+      --card: #1a211c;
+      --text: #e8eee9;
+      --muted: #9aa89e;
+      --accent: #3d8f62;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.5 system-ui, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    main {
+      max-width: 40rem;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 4rem;
+    }
+    h1 { font-size: 1.5rem; font-weight: 650; margin: 0 0 0.35rem; }
+    .sub { color: var(--muted); margin: 0 0 1.75rem; }
+    ol { padding-left: 1.25rem; }
+    li { margin: 0.65rem 0; }
+    .flash {
+      margin: 1.75rem 0;
+      padding: 1.25rem;
+      background: var(--card);
+      border-radius: 12px;
+    }
+    esp-web-install-button {
+      --esp-tools-button-color: var(--accent);
+      --esp-tools-button-text-color: #fff;
+      --esp-tools-button-border-radius: 8px;
+    }
+    .note { color: var(--muted); font-size: 0.92rem; }
+    a { color: #7dcea0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>MyAthan USB flasher</h1>
+    <p class="sub">Install ESP8266 firmware <strong>v2.2.8</strong> from this computer. Use a USB cable. Phones will not work.</p>
+
+    <ol>
+      <li>Open this page in <strong>Google Chrome</strong> or Microsoft Edge on a Windows / Mac / Linux PC. Not Safari, not iPhone, not Android Chrome.</li>
+      <li>Plug the MyAthan box into USB. On Windows, install the <a href="https://www.wch-ic.com/downloads/CH341SER_EXE.html">CH340 driver</a> if Windows does not show a COM port.</li>
+      <li>Click <strong>Connect</strong> below. Pick the USB / CH340 / UART port (not Bluetooth). Pair / allow access if Chrome asks.</li>
+      <li>Install firmware. Wait until it finishes, then unplug and plug the box back in.</li>
+      <li>On your phone, join the Wi‑Fi network <strong>MyAthan Setup</strong> (no password). Open a browser to <strong>http://192.168.4.1</strong> and save your home Wi‑Fi.</li>
+    </ol>
+
+    <div class="flash">
+      <esp-web-install-button manifest="./manifest.json">
+        <button slot="activate">Connect</button>
+        <span slot="unsupported">This browser cannot flash over USB. Open this page in Chrome or Edge on a computer.</span>
+        <span slot="not-allowed">USB flashing only works on https:// (or localhost). Use the GitHub Pages link, not a raw file.</span>
+      </esp-web-install-button>
+      <p class="note">If the port list is empty, try another USB cable (data, not charge-only) and a USB-A port on the PC.</p>
+    </div>
+  </main>
+</body>
+</html>
