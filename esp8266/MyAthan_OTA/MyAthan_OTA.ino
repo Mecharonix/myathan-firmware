@@ -7,12 +7,8 @@
  * - Volume UP Button   ->  ESP8266 D6 (GPIO 12)
  * - Volume DOWN Button ->  ESP8266 D7 (GPIO 13)
  *
- * Build FQBN (must match CI):
- *   esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=basic
- *
- * 2.2.8 is a bridge: 15-minute OTA checks + extra failsafes so a fleet can
- * move off a too-tight flash layout without USB. 2.2.9 restores the full UI
- * (control_full.html) and the daily 00:30 OTA window.
+ * Build FQBN (must match USB flasher / 4M2M devices):
+ *   esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=all
  */
 
 #include <Arduino.h>
@@ -21,12 +17,14 @@
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
 #include <JQ6500_Serial.h>
 #include <SoftwareSerial.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
 #include <ESP8266httpUpdate.h>
+#include <user_interface.h>
 #include "web_pages_gz.h"
 
 // --- Configuration ---
@@ -41,7 +39,7 @@ DNSServer dnsServer;
 // Bump FW_VERSION on every release; the CI publishes it to version.txt and the
 // device compares against it. URLs point at a fixed pre-release tag so the
 // ESP8266 never picks up the repo's ESP32-C3 releases.
-#define FW_VERSION "2.2.8"
+#define FW_VERSION "2.2.9"
 // 2.2.8 bridge: poll GitHub often so a follow-up 2.2.9 can land the same day.
 // 2.2.9 should restore OTA_CHECK_HOUR/MIN (00:30) and drop this interval.
 #define OTA_CHECK_INTERVAL_MS (15UL * 60UL * 1000UL)
@@ -80,10 +78,11 @@ String otaStatus = "Idle";
 #define MAGIC1 0xCA
 #define MAGIC2 0xFE
 
-// Wait 15s for saved STA, then open the portal. Keep retrying that same
-// SSID/password during the portal until STA connects or /save writes new creds.
-#define WIFI_PORTAL_DELAY_MS   15000
-#define WIFI_RETRY_INTERVAL_MS 15000
+// STA-only first so the radio can scan every channel. Then open the portal and
+// keep retrying saved creds without a blocking WiFi scan while a phone is on
+// the AP (scanNetworks drops SoftAP clients and kills Android's captive portal).
+#define WIFI_PORTAL_DELAY_MS   45000
+#define WIFI_RETRY_INTERVAL_MS 20000
 
 // --- State ---
 bool isAPMode = false;
@@ -239,19 +238,27 @@ void serveControlPage() { sendGzipPage(CONTROL_HTML_GZ, CONTROL_HTML_GZ_LEN); }
 
 boolean handleCaptivePortal() {
   String host = server.hostHeader();
+  host.toLowerCase();
   String uri = server.uri();
+  uri.toLowerCase();
 
-  if (uri.indexOf("connecttest") != -1 || uri.indexOf("ncsi") != -1 ||
-      uri.indexOf("generate_204") != -1 || uri.indexOf("redirect") != -1 ||
-      uri.indexOf("success.txt") != -1 || uri.indexOf("hotspot-detect") != -1) {
-    serveSetupPage();
-    return true;
-  }
+  bool setupHost = isIp(host) || host.startsWith("192.168.4.1") ||
+                   host == "myathan.local";
+  bool probe = uri.indexOf("generate_204") != -1 || uri.indexOf("gen_204") != -1 ||
+               uri.indexOf("connecttest") != -1 || uri.indexOf("ncsi") != -1 ||
+               uri.indexOf("success.txt") != -1 || uri.indexOf("hotspot-detect") != -1 ||
+               uri.indexOf("canonical") != -1 || uri.indexOf("fwlink") != -1 ||
+               uri.indexOf("redirect") != -1 || uri.indexOf("wifistub") != -1 ||
+               uri.indexOf("wpad") != -1;
 
-  if (!isIp(host) && host != "myathan.local") {
+  if (setupHost && uri == "/") return false;
+
+  if (!setupHost || probe) {
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "-1");
     server.sendHeader("Location", "http://192.168.4.1/", true);
     server.send(302, "text/plain", "");
-    server.client().stop();
     return true;
   }
   return false;
@@ -825,20 +832,38 @@ void registerControlRoutes() {
   server.on("/api/ota", HTTP_POST, handleOtaCheck);
 }
 
+void advertiseMdns() {
+  MDNS.end();
+  if (MDNS.begin("myathan")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("[mDNS] http://myathan.local");
+  } else {
+    Serial.println("[mDNS] begin failed");
+  }
+}
+
 void rememberSavedWifi() {
   strncpy(savedSsid, WiFi.SSID().c_str(), sizeof(savedSsid) - 1);
   savedSsid[sizeof(savedSsid) - 1] = 0;
   strncpy(savedPass, WiFi.psk().c_str(), sizeof(savedPass) - 1);
   savedPass[sizeof(savedPass) - 1] = 0;
+  if (savedSsid[0] == 0) {
+    struct station_config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    wifi_station_get_config_default(&cfg);
+    strncpy(savedSsid, reinterpret_cast<char *>(cfg.ssid), sizeof(savedSsid) - 1);
+    strncpy(savedPass, reinterpret_cast<char *>(cfg.password), sizeof(savedPass) - 1);
+    savedSsid[sizeof(savedSsid) - 1] = 0;
+    savedPass[sizeof(savedPass) - 1] = 0;
+  }
   hasSavedWifi = savedSsid[0] != 0;
+  if (hasSavedWifi)
+    Serial.printf("[WiFi] Saved SSID %s\n", savedSsid);
 }
 
-void retrySavedWifi() {
-  if (!hasSavedWifi || WiFi.status() == WL_CONNECTED) return;
-
-  // ESP8266 radio is one channel: SoftAP and STA must match. If the portal
-  // stayed on channel 1, a router on another channel would never be seen.
-  int ch = 0;
+int scanChannelForSavedWifi() {
+  if (!hasSavedWifi) return 1;
+  int ch = 1;
   int n = WiFi.scanNetworks(false, true);
   for (int i = 0; i < n; i++) {
     if (WiFi.SSID(i) == savedSsid) {
@@ -847,13 +872,20 @@ void retrySavedWifi() {
     }
   }
   WiFi.scanDelete();
+  return ch;
+}
 
+void retrySavedWifi() {
+  if (!hasSavedWifi || WiFi.status() == WL_CONNECTED) return;
   WiFi.persistent(false);
-  if (ch > 0) {
+  // A blocking scan here knocks phones off MyAthan Setup, so Android never
+  // opens the login page. Only retune the AP channel when nobody is associated.
+  if (WiFi.softAPgetStationNumber() == 0) {
+    int ch = scanChannelForSavedWifi();
     Serial.printf("[WiFi] Retry %s on ch %d\n", savedSsid, ch);
     WiFi.softAP(AP_SSID, NULL, ch, 0, 4);
   } else {
-    Serial.printf("[WiFi] Retry %s (not in scan yet)\n", savedSsid);
+    Serial.printf("[WiFi] Retry %s (phone on portal)\n", savedSsid);
   }
   WiFi.begin(savedSsid, savedPass);
 }
@@ -869,6 +901,7 @@ void leavePortalForSavedWifi() {
   digitalWrite(READY_PIN, LOW);
   lastSeenSSID = WiFi.SSID();
   registerControlRoutes();
+  advertiseMdns();
 }
 
 // =====================================================
@@ -884,7 +917,7 @@ void setup() {
 
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.setAutoReconnect(false);
-  WiFi.hostname("MyAthan");
+  WiFi.hostname("myathan");
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   delay(100);
@@ -906,6 +939,7 @@ void setup() {
   pinMode(13, INPUT_PULLUP);
 
   Serial.print("Connecting to WiFi");
+  WiFi.persistent(true);
   WiFi.begin();
   unsigned long waitStart = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - waitStart < WIFI_PORTAL_DELAY_MS) {
@@ -922,33 +956,39 @@ void setup() {
   if (WiFi.status() != WL_CONNECTED) {
     isAPMode = true;
     Serial.println("WiFi Failed. Starting SoftAP + Station...");
+    int ch = scanChannelForSavedWifi();
     WiFi.mode(WIFI_AP_STA);
     delay(100);
     IPAddress apIP(192, 168, 4, 1);
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    WiFi.softAP(AP_SSID, NULL, 1, 0, 4);
+    WiFi.softAP(AP_SSID, NULL, ch, 0, 4);
 
-    Serial.print("Access Point Started: ");
-    Serial.println(AP_SSID);
+    Serial.printf("Access Point Started: %s ch %d\n", AP_SSID, ch);
 
     if (hasSavedWifi) {
+      WiFi.persistent(false);
+      WiFi.begin(savedSsid, savedPass);
       lastWifiRetry = millis();
-      retrySavedWifi();
     }
 
+    dnsServer.setTTL(30);
     dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
     dnsServer.start(53, "*", apIP);
 
     server.on("/", handleRoot);
     server.on("/save", handleSave);
     server.on("/generate_204", handleRoot);
+    server.on("/gen_204", handleRoot);
     server.on("/ncsi.txt", handleRoot);
     server.on("/connecttest.txt", handleRoot);
     server.on("/success.txt", handleRoot);
     server.on("/redirect", handleRoot);
     server.on("/hotspot-detect.html", handleRoot);
+    server.on("/canonical.html", handleRoot);
+    server.on("/fwlink", handleRoot);
     server.onNotFound(handleNotFound);
     server.begin();
+    advertiseMdns();
   } else {
     Serial.print("Connected! IP: ");
     Serial.println(WiFi.localIP());
@@ -962,7 +1002,7 @@ void setup() {
     server.on("/", serveControlPage);
     registerControlRoutes();
     server.begin();
-    Serial.println("http://<device-ip>/  (mDNS off in 2.2.8)");
+    advertiseMdns();
   }
 }
 
@@ -970,6 +1010,7 @@ void setup() {
 // LOOP
 // =====================================================
 void loop() {
+  MDNS.update();
   if (isAPMode) {
     dnsServer.processNextRequest();
     server.handleClient();

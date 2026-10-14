@@ -36,11 +36,9 @@ jobs:
 
       - name: Compile firmware
         run: |
-          # 4M2M: ~1MB OTA slot after this image is installed (was easy to
-          # land on 4M3M / ~512KB OTA in the Arduino IDE). ssl=basic trims
-          # BearSSL so this build still fits in a tight 4M3M leftover slot.
+          # 4M2M: ~1MB OTA slot. ssl=all = full BearSSL (AlAdhan + GitHub HTTPS).
           arduino-cli compile \
-            --fqbn esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=basic \
+            --fqbn esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=all \
             --libraries esp8266/libraries \
             --output-dir build \
             esp8266/MyAthan_OTA
