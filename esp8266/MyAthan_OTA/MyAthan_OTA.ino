@@ -39,10 +39,10 @@ DNSServer dnsServer;
 // Bump FW_VERSION on every release; the CI publishes it to version.txt and the
 // device compares against it. URLs point at a fixed pre-release tag so the
 // ESP8266 never picks up the repo's ESP32-C3 releases.
-#define FW_VERSION "2.2.10"
-// 2.2.8 bridge: poll GitHub often so a follow-up 2.2.9 can land the same day.
-// 2.2.9 should restore OTA_CHECK_HOUR/MIN (00:30) and drop this interval.
-#define OTA_CHECK_INTERVAL_MS (15UL * 60UL * 1000UL)
+#define FW_VERSION "2.2.11"
+// Daily automatic OTA, offset from the 00:00 prayer refresh so they never collide.
+#define OTA_CHECK_HOUR 0
+#define OTA_CHECK_MIN  30
 #define OTA_MIN_HEAP 14000
 // USB-flash the one test device with this set to 1. Every other unit still
 // reads esp8266-latest (currently 2.2.7) and will not see esp8266-test.
@@ -74,6 +74,8 @@ String otaStatus = "Idle";
 #define EE_TUNE_FLAG 20  // 1 byte sentinel (0xA5 = per-prayer tune offsets stored)
 #define EE_TUNE   21  // 5 x int16_t = 10 bytes, per-prayer minute offsets (21..30)
 #define EE_TUNE_SET 0xA5
+#define EE_LED_LEAD 31  // 1 byte: minutes before athan to turn D8 on (0..30)
+#define EE_LED_LEAD_DEFAULT 10
 #define EE_SIZE  512
 #define MAGIC1 0xCA
 #define MAGIC2 0xFE
@@ -95,6 +97,7 @@ float myLat = 0.0, myLon = 0.0;
 long currentOffset = 0;
 bool isManual = false;
 byte currentVolume = 20;
+byte ledLeadMin = EE_LED_LEAD_DEFAULT;
 bool isAthanActive = false;
 unsigned long athanOffTime = 0;
 unsigned long statusGracePeriod = 0;
@@ -372,6 +375,7 @@ void handleApiStatus() {
   json += ",\"playing\":";
   json += isAthanActive ? "true" : "false";
   json += ",\"volume\":" + String(currentVolume);
+  json += ",\"ledLead\":" + String(ledLeadMin);
   json += ",\"manual\":";
   json += isManual ? "true" : "false";
   json += ",\"lat\":" + String(myLat, 4);
@@ -517,6 +521,33 @@ void handleSetVolume() {
   server.send(200, "text/plain", String(currentVolume));
 }
 
+void applyLedLeadTimes() {
+  for (int i = 0; i < 5; i++) {
+    if (prayers[i].name.length() == 0) continue;
+    int adj = prayers[i].hour * 60 + prayers[i].minute;
+    int total = adj - (int)ledLeadMin;
+    if (total < 0) total += 1440;
+    prayers[i].readyHour = total / 60;
+    prayers[i].readyMinute = total % 60;
+  }
+}
+
+void handleSetLedLead() {
+  if (!server.hasArg("mins")) {
+    server.send(400, "text/plain", "Missing mins");
+    return;
+  }
+  int m = server.arg("mins").toInt();
+  if (m < 0) m = 0;
+  if (m > 30) m = 30;
+  ledLeadMin = (byte)m;
+  EEPROM.write(EE_LED_LEAD, ledLeadMin);
+  EEPROM.commit();
+  applyLedLeadTimes();
+  Serial.printf("Web: LED lead %d min\n", ledLeadMin);
+  server.send(200, "text/plain", String(ledLeadMin));
+}
+
 void handleRestart() {
   server.send(200, "text/plain", "Restarting...");
   server.client().flush();
@@ -653,7 +684,7 @@ bool fetchPrayerTimes() {
     prayers[i].hour = adj / 60;
     prayers[i].minute = adj % 60;
 
-    int total = adj - 10;
+    int total = adj - (int)ledLeadMin;
     if (total < 0) total += 1440;
     prayers[i].readyHour = total / 60;
     prayers[i].readyMinute = total % 60;
@@ -845,6 +876,7 @@ void registerControlRoutes() {
   server.on("/api/tune", HTTP_POST, handleSetTune);
   server.on("/api/sync", HTTP_POST, handleManualSync);
   server.on("/api/volume", HTTP_POST, handleSetVolume);
+  server.on("/api/ledlead", HTTP_POST, handleSetLedLead);
   server.on("/api/restart", HTTP_POST, handleRestart);
   server.on("/api/ota", HTTP_POST, handleOtaCheck);
 }
@@ -947,6 +979,9 @@ void setup() {
   if (currentVolume > 30 || currentVolume < 1)
     currentVolume = 20;
   applySavedVolume();
+  ledLeadMin = EEPROM.read(EE_LED_LEAD);
+  if (ledLeadMin > 30)
+    ledLeadMin = EE_LED_LEAD_DEFAULT;
 
   loadLocationFromEEPROM();
   // Apply saved TZ immediately so the clock is correct from the start
@@ -1112,7 +1147,8 @@ void loop() {
     lastCheckMin = timeinfo->tm_min;
 
     for (int i = 0; i < 5; i++) {
-      if (timeinfo->tm_hour == prayers[i].readyHour &&
+      if (ledLeadMin > 0 &&
+          timeinfo->tm_hour == prayers[i].readyHour &&
           timeinfo->tm_min == prayers[i].readyMinute) {
         Serial.println("Trigger: PRE-ATHAN ACTIVE");
         digitalWrite(READY_PIN, HIGH);
@@ -1129,12 +1165,14 @@ void loop() {
     }
   }
 
-  // === 2.2.8 BRIDGE: OTA every 15 minutes (2.2.9 restores daily 00:30) ===
-  static unsigned long lastOtaPoll = 0;
-  if (!isAPMode && WiFi.status() == WL_CONNECTED && !isAthanActive &&
-      millis() - lastOtaPoll >= OTA_CHECK_INTERVAL_MS) {
-    lastOtaPoll = millis();  // set first so a failed update won't retry-loop
-    Serial.println("[OTA] Periodic auto-check");
+  // === DAILY AUTO OTA CHECK (00:30 — after the 00:00 prayer refresh) ===
+  static int lastOtaCheckDay = -1;
+  if (timeinfo->tm_year > 100 && !isAPMode && WiFi.status() == WL_CONNECTED &&
+      hasFirstSync && !isAthanActive &&
+      timeinfo->tm_hour == OTA_CHECK_HOUR && timeinfo->tm_min == OTA_CHECK_MIN &&
+      timeinfo->tm_mday != lastOtaCheckDay) {
+    lastOtaCheckDay = timeinfo->tm_mday;
+    Serial.println("[OTA] Daily auto-check");
     runOtaCheck(true);
   }
 

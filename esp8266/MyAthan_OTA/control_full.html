@@ -77,6 +77,9 @@ input[type=range]{width:100%;margin:6px 0;accent-color:#0f6651}
 </div>
 <label class='lbl'>Volume <b id='vol-display'>--%</b></label>
 <input type='range' id='vol-in' min='0' max='100' step='1' value='66'>
+<label class='lbl'>Lights before athan <b id='lead-display'>10 min</b></label>
+<input type='range' id='lead-in' min='0' max='30' step='1' value='10'>
+<p class='hint' style='margin-top:0'>0 = lights only when the athan starts. Default 10 minutes.</p>
 </div>
 </div>
 
@@ -277,6 +280,29 @@ volSlider.addEventListener('change', function(){
   });
 });
 
+function leadLabel(m){
+  m = parseInt(m, 10);
+  if (m === 0) return '0 min (with athan)';
+  if (m === 1) return '1 min';
+  return m + ' min';
+}
+var leadSlider = document.getElementById('lead-in');
+var leadDisplay = document.getElementById('lead-display');
+var leadUserActive = false;
+leadSlider.addEventListener('input', function(){
+  leadUserActive = true;
+  leadDisplay.textContent = leadLabel(this.value);
+});
+leadSlider.addEventListener('change', function(){
+  fetch('/api/ledlead', {
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: 'mins=' + encodeURIComponent(this.value)
+  }).finally(function(){
+    setTimeout(function(){ leadUserActive = false; }, 800);
+  });
+});
+
 function doRestart(){
   if (!confirm('Restart the device now? It will be offline for ~5 seconds.')) return;
   fetch('/api/restart', {method:'POST'}).catch(function(){});
@@ -342,6 +368,10 @@ function refresh(){
       var pct = Math.round((s.volume / 30) * 100);
       volSlider.value = pct;
       volDisplay.textContent = pct + '%';
+    }
+    if (!leadUserActive && typeof s.ledLead === 'number') {
+      leadSlider.value = s.ledLead;
+      leadDisplay.textContent = leadLabel(s.ledLead);
     }
     document.getElementById('ssid').textContent = s.ssid || '--';
     document.getElementById('ip').textContent = s.ip || '--';
