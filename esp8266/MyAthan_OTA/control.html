@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8">
+<title>MyAthan</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:sans-serif;background:#0f6651;color:#1a1a1a;padding:16px}
+.app{max-width:560px;margin:0 auto}
+h1{color:#fff;margin:8px 0 16px;font-size:22px}
+.card{background:#fff;border-radius:12px;padding:14px;margin-bottom:12px}
+h2{margin:0 0 10px;font-size:12px;color:#7c8a99;text-transform:uppercase}
+.row{display:flex;gap:8px;margin:8px 0}
+.row>*{flex:1}
+button,input,select{width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #dfe4ea;font-size:14px;font-family:inherit}
+button{border:none;font-weight:600;cursor:pointer}
+.ok{background:#27ae60;color:#fff}
+.bad{background:#e74c3c;color:#fff}
+.save{background:#2c7be5;color:#fff}
+.line{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0f2f5;font-size:14px}
+.hint{font-size:12px;color:#7c8a99}
+</style></head>
+<body><div class="app">
+<h1>MyAthan <small id="fw"></small></h1>
+<div class="card">
+<h2>Player</h2>
+<div class="row">
+<button class="ok" onclick="cmd('/play')">Play</button>
+<button class="bad" onclick="cmd('/stop')">Stop</button>
+</div>
+<label>Volume <span id="vol-display"></span></label>
+<input type="range" id="vol-in" min="0" max="100" value="66">
+</div>
+<div class="card">
+<h2>Prayers</h2>
+<div id="prayers">...</div>
+</div>
+<div class="card">
+<h2>Settings</h2>
+<select id="method-in">
+<option value="4">Umm al-Qura</option><option value="3">MWL</option>
+<option value="2">ISNA</option><option value="5">Egyptian</option>
+<option value="1">Karachi</option><option value="13">Diyanet</option>
+<option value="12">UOIF</option><option value="0">Jafari</option>
+</select>
+<select id="school-in"><option value="0">Asr Standard</option><option value="1">Asr Hanafi</option></select>
+<select id="latadj-in">
+<option value="0">High-lat none</option><option value="1">Midnight</option>
+<option value="2">One-seventh</option><option value="3">Angle</option>
+</select>
+<label><input type="checkbox" id="autotz-in" style="width:auto"> Auto timezone</label>
+<button class="save" onclick="saveSettings()">Save settings</button>
+</div>
+<div class="card">
+<h2>Location</h2>
+<div class="line"><b>Mode</b><span id="mode"></span></div>
+<div class="line"><b>Lat</b><span id="lat"></span></div>
+<div class="line"><b>Lon</b><span id="lon"></span></div>
+<div class="line"><b>Sync</b><span id="sstatus"></span></div>
+<div class="row">
+<input type="number" id="lat-in" step="0.0001" placeholder="lat">
+<input type="number" id="lon-in" step="0.0001" placeholder="lon">
+</div>
+<button class="save" onclick="saveLoc()">Save location</button>
+<button onclick="fetch('/api/auto',{method:'POST'}).then(refresh)">Use automatic</button>
+<button onclick="fetch('/api/sync',{method:'POST'}).then(function(){setTimeout(refresh,2000)})">Re-sync</button>
+</div>
+<div class="card">
+<h2>Device / OTA</h2>
+<div class="line"><b>Update</b><span id="ota"></span></div>
+<p class="hint">Bridge 2.2.8 checks GitHub every 15 minutes. Use the button to test now.</p>
+<button class="save" onclick="checkUpdate()">Check for updates</button>
+<button onclick="if(confirm('Restart?'))fetch('/api/restart',{method:'POST'})">Restart</button>
+</div>
+</div>
+<script>
+var volUser=false, settingsLoaded=false;
+var volSlider=document.getElementById('vol-in');
+volSlider.oninput=function(){volUser=true;document.getElementById('vol-display').textContent=this.value+'%'};
+volSlider.onchange=function(){
+  fetch('/api/volume',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'vol='+this.value})
+    .finally(function(){setTimeout(function(){volUser=false},800)});
+};
+function cmd(u){fetch(u).then(function(){setTimeout(refresh,250)})}
+function saveSettings(){
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'method='+document.getElementById('method-in').value
+      +'&school='+document.getElementById('school-in').value
+      +'&latadj='+document.getElementById('latadj-in').value
+      +'&autotz='+(document.getElementById('autotz-in').checked?1:0)}).then(refresh);
+}
+function saveLoc(){
+  var lat=document.getElementById('lat-in').value, lon=document.getElementById('lon-in').value;
+  if(!lat||!lon){alert('Enter lat and lon');return}
+  fetch('/api/location',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'lat='+lat+'&lon='+lon+'&offset=0'}).then(refresh);
+}
+function checkUpdate(){
+  var o=document.getElementById('ota'); o.textContent='Checking...';
+  fetch('/api/ota',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'apply=0'})
+    .then(function(r){return r.text()}).then(function(t){
+      o.textContent=t;
+      if(t.indexOf('Update available')===0 && confirm(t+'\nInstall now?')){
+        o.textContent='Updating...';
+        fetch('/api/ota',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'apply=1'}).catch(function(){});
+        setTimeout(function(){location.reload()},60000);
+      } else if(t.indexOf('Update available')!==0) alert(t);
+    }).catch(function(){o.textContent='Check failed'});
+}
+function refresh(){
+  fetch('/api/status').then(function(r){return r.json()}).then(function(s){
+    document.getElementById('fw').textContent=s.fw||'';
+    document.getElementById('ota').textContent=s.ota||'';
+    document.getElementById('mode').textContent=s.manual?'Manual':'Auto';
+    document.getElementById('lat').textContent=(s.lat||0).toFixed(4);
+    document.getElementById('lon').textContent=(s.lon||0).toFixed(4);
+    document.getElementById('sstatus').textContent=s.syncStatus||'';
+    document.getElementById('play-status') && (document.getElementById('play-status').textContent=s.playing?'Playing':'Idle');
+    if(!volUser && typeof s.volume==='number'){
+      var pct=Math.round(s.volume/30*100); volSlider.value=pct;
+      document.getElementById('vol-display').textContent=pct+'%';
+    }
+    if(!settingsLoaded && typeof s.method==='number'){
+      document.getElementById('method-in').value=String(s.method);
+      document.getElementById('school-in').value=String(s.school);
+      document.getElementById('latadj-in').value=String(s.latadj);
+      document.getElementById('autotz-in').checked=s.autotz==1;
+      settingsLoaded=true;
+    }
+    if(s.prayers){
+      var h='';
+      for(var i=0;i<s.prayers.length;i++){
+        var p=s.prayers[i];
+        h+='<div class="line"><b>'+p.name+'</b><span>'+String(p.hour).padStart(2,'0')+':'+String(p.minute).padStart(2,'0')+'</span></div>';
+      }
+      document.getElementById('prayers').innerHTML=h;
+    }
+    document.getElementById('lat-in').placeholder=String((s.lat||0).toFixed(4));
+    document.getElementById('lon-in').placeholder=String((s.lon||0).toFixed(4));
+  }).catch(function(){});
+}
+refresh(); setInterval(refresh,4000);
+</script></body></html>

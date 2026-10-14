@@ -1,40 +1,31 @@
-# MyAthan — ESP8266 firmware (branch `esp8266-ota`)
+# MyAthan (ESP8266)
 
-**This branch contains only the ESP8266 build of MyAthan and its over-the-air (OTA) update pipeline.**
+Prayer times on the box, a web page on your phone, and updates from GitHub.
 
-It is deliberately kept separate from `main`, which holds the older **ESP32-C3** PlatformIO
-project. That ESP32-C3 code is **not** on this branch and is left completely untouched on `main`.
+## What’s in 2.2.10
 
-> ⚠️ **Do not merge this branch into `main`.** Doing so would delete the ESP32-C3 project from
-> `main`. This branch is a self-contained home for the ESP8266 firmware and publishes its own
-> OTA releases directly — no merge is needed.
+- Volume stays at the level you set (it no longer drops after each prayer)
+- Joins your saved Wi‑Fi again after a power cut
+- Setup page should open when you join **MyAthan Setup**
+- Open the box at **http://myathan.local**
+- Extra room on the chip for later updates (needs a USB flash once if OTA says there is not enough space)
 
-## What's here
-- **`esp8266/MyAthan_OTA/MyAthan_OTA.ino`** — the firmware (single-file Arduino sketch):
-  prayer times from the AlAdhan API (Umm al-Qura by default), DST-correct timezone via
-  `iso8601`, configurable calculation method / Asr school / high-latitude rule, per-prayer
-  minute offsets, a local web UI at `myathan.local`, and self-update over the air.
-- **`esp8266/libraries/JQ6500_Serial/`** — vendored audio-module library so CI builds are reproducible.
-- **`.github/workflows/esp8266.yml`** — builds the sketch on every push to this branch and
-  publishes `firmware.bin` + `version.txt` to the **`esp8266-latest`** pre-release tag.
+## How to update
 
-## Hardware
-ESP8266 (NodeMCU / ESP-12, CH340 USB-serial) + JQ6500 audio module. Pin wiring is documented
-in the header of the sketch.
+**USB installer (Chrome or Edge on a computer):**  
+https://mecharonix.github.io/myathan-firmware/
 
-## Build & flash locally
-```bash
-arduino-cli core install esp8266:esp8266@3.1.2
-arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --libraries esp8266/libraries esp8266/MyAthan_OTA
-arduino-cli upload  -p COM5 --fqbn esp8266:esp8266:nodemcuv2 esp8266/MyAthan_OTA
-```
-Or open `esp8266/MyAthan_OTA/MyAthan_OTA.ino` in the Arduino IDE (board: **NodeMCU 1.0 (ESP-12E)**).
+Use USB if:
 
-## Over-the-air updates
-1. Bump `FW_VERSION` in `MyAthan_OTA.ino`.
-2. Push to this branch — CI rebuilds and refreshes the `esp8266-latest` release.
-3. On the device: `myathan.local` → **Device → Check for Updates**. It compares the published
-   `version.txt` against its built-in `FW_VERSION` and flashes itself if a newer build exists.
+- this is a new box, or
+- the screen / web page says **Not Enough space**, or
+- the box is on older software and will not take an automatic update
 
-The `esp8266-latest` tag is a **pre-release**, kept separate from the ESP32-C3 `v*` releases so
-the two devices never download each other's binaries.
+Leave **Erase** unchecked if the box was already set up. Wi‑Fi, prayer offsets, and calculation method stay.
+
+**If this box is already on 2.2.9 or 2.2.10** (you used the USB page, or it already has this software):  
+it can update itself from GitHub. Open **http://myathan.local** → Check for Updates, or wait for the automatic check. You do not need USB every time.
+
+**If the box is still on 2.2.8 or older**, do not wait for automatic OTA. Use the USB page once, then later updates can be automatic.
+
+After USB, wait up to about a minute for home Wi‑Fi. If **MyAthan Setup** appears, join it (no password). The setup page should open; if not, go to http://192.168.4.1

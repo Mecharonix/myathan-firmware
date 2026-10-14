@@ -1,8 +1,6 @@
 name: ESP8266 Firmware (OTA)
 
-# Builds the ESP8266 sketch under esp8266/ and publishes firmware.bin + version.txt
-# to the fixed "esp8266-latest" pre-release tag, which the device pulls over the air.
-# Scoped to esp8266/** so it never touches or depends on the ESP32-C3 project.
+# One firmware push: this branch. Publishes esp8266-latest and refreshes the USB page.
 
 on:
   push:
@@ -14,10 +12,19 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,10 +38,15 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp8266:esp8266@3.1.2
 
+      - name: Pack gzip web pages
+        run: |
+          cp esp8266/MyAthan_OTA/control_full.html esp8266/MyAthan_OTA/control.html
+          python3 esp8266/MyAthan_OTA/pack_web.py
+
       - name: Compile firmware
         run: |
           arduino-cli compile \
-            --fqbn esp8266:esp8266:nodemcuv2 \
+            --fqbn esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=all \
             --libraries esp8266/libraries \
             --output-dir build \
             esp8266/MyAthan_OTA
@@ -61,6 +73,34 @@ jobs:
           body: |
             Auto-built **ESP8266** MyAthan firmware **v${{ steps.prep.outputs.version }}**.
 
-            The ESP8266 device pulls `firmware.bin` + `version.txt` from this fixed
-            `esp8266-latest` tag (kept separate from the ESP32-C3 `v*` releases so the
-            two devices never download each other's binaries).
+            USB installer: https://mecharonix.github.io/myathan-firmware/
+
+      - name: Checkout USB flasher page
+        uses: actions/checkout@v4
+        with:
+          ref: esp8266-web-flasher
+          path: site
+
+      - name: Stage Pages site from this firmware
+        run: |
+          cp firmware.bin site/firmware.bin
+          cp version.txt site/version.txt
+          python3 - <<PY
+          import json
+          from pathlib import Path
+          version = Path("version.txt").read_text(encoding="utf-8").strip()
+          p = Path("site/manifest.json")
+          m = json.loads(p.read_text(encoding="utf-8"))
+          m["version"] = version
+          p.write_text(json.dumps(m, indent=2) + "\n", encoding="utf-8")
+          print("Pages firmware", version, Path("site/firmware.bin").stat().st_size, "bytes")
+          PY
+          rm -rf site/.github site/.git
+          rm -f site/INSTRUCTIONS.md site/README.md
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
