@@ -6,18 +6,13 @@ Install or recover the ESP8266 MyAthan box from a computer.
 
 This page always installs the same firmware as GitHub **esp8266-latest**.
 
-## What’s in 2.2.10
-
-- Volume stays at the level you set
-- Joins saved Wi‑Fi after a power cut
-- Setup page should open on **MyAthan Setup**
-- **http://myathan.local** after it is on your network
+Current software: **2.2.11** (same as GitHub **esp8266-latest**). What changed in each version: see the `esp8266-ota` README changelog.
 
 ## When to use this page
 
 Use USB if the box is new, stuck, or OTA says **Not Enough space**.
 
-If the box is already on **2.2.9 or 2.2.10**, prefer **http://myathan.local** → Check for Updates (or wait for the automatic check). You do not need to USB-flash every update.
+If the box is already on **2.2.9 or later**, prefer **http://myathan.local** → Check for Updates (or wait for 00:30). You do not need to USB-flash every update.
 
 ## How to flash
 
