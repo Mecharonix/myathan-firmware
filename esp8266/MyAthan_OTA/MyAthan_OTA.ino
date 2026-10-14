@@ -880,7 +880,7 @@ void retrySavedWifi() {
   WiFi.persistent(false);
   // A blocking scan here knocks phones off MyAthan Setup, so Android never
   // opens the login page. Only retune the AP channel when nobody is associated.
-  if (WiFi.softAPgetStationNumber() == 0) {
+  if (WiFi.softAPgetStationNum() == 0) {
     int ch = scanChannelForSavedWifi();
     Serial.printf("[WiFi] Retry %s on ch %d\n", savedSsid, ch);
     WiFi.softAP(AP_SSID, NULL, ch, 0, 4);
