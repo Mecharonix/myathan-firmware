@@ -1,5 +1,8 @@
 name: Deploy web flasher
 
+# HTML for this page lives here. Firmware.bin always comes from esp8266-latest
+# (published when someone pushes esp8266-ota). Do not compile on this branch.
+
 on:
   push:
     branches: [esp8266-web-flasher]
@@ -12,7 +15,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -21,64 +24,35 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout flasher page
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           path: site
 
-      - name: Checkout firmware with WiFi retry + 4M2M CI
-        uses: actions/checkout@v4
-        with:
-          ref: esp8266-wip-bridge
-          path: fw
-
-      - name: Set up Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
-
-      - name: Install ESP8266 core
+      - name: Fetch firmware from esp8266-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          arduino-cli config init
-          arduino-cli config add board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-          arduino-cli core update-index
-          arduino-cli core install esp8266:esp8266@3.1.2
-
-      - name: Prepare USB image
-        run: |
+          gh release download esp8266-latest \
+            --repo "${{ github.repository }}" \
+            --pattern firmware.bin \
+            --pattern version.txt \
+            --dir site \
+            --clobber
           python3 - <<'PY'
-          from pathlib import Path
-          ino = Path("fw/esp8266/MyAthan_OTA/MyAthan_OTA.ino")
-          text = ino.read_text(encoding="utf-8")
-          text = text.replace("#define OTA_USE_TEST_CHANNEL 1", "#define OTA_USE_TEST_CHANNEL 0")
-          ino.write_text(text, encoding="utf-8")
-          PY
-          cp fw/esp8266/MyAthan_OTA/control_full.html fw/esp8266/MyAthan_OTA/control.html
-          python3 fw/esp8266/MyAthan_OTA/pack_web.py
-
-      - name: Compile 4M2M firmware
-        run: |
-          arduino-cli compile \
-            --fqbn esp8266:esp8266:nodemcuv2:eesz=4M2M,ssl=all \
-            --libraries fw/esp8266/libraries \
-            --output-dir fw/build \
-            fw/esp8266/MyAthan_OTA
-          cp fw/build/MyAthan_OTA.ino.bin site/firmware.bin
-          VERSION=$(grep -oP '#define\s+FW_VERSION\s+"\K[^"]+' fw/esp8266/MyAthan_OTA/MyAthan_OTA.ino)
-          python3 - <<PY
           import json
           from pathlib import Path
+          version = Path("site/version.txt").read_text(encoding="utf-8").strip()
           p = Path("site/manifest.json")
           m = json.loads(p.read_text(encoding="utf-8"))
-          m["version"] = "$VERSION"
+          m["version"] = version
           p.write_text(json.dumps(m, indent=2) + "\n", encoding="utf-8")
-          print("USB firmware", "$VERSION", p.with_name("firmware.bin").stat().st_size, "bytes")
+          print("USB firmware", version, Path("site/firmware.bin").stat().st_size, "bytes")
           PY
 
       - name: Stage Pages tree
         run: |
           rm -rf site/.github site/.git
           rm -f site/INSTRUCTIONS.md site/README.md
-          find site -maxdepth 1 -type f -print
-          ls -l site/firmware.bin
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

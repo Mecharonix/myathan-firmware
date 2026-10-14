@@ -1,11 +1,28 @@
-﻿# MyAthan web flasher
+﻿# MyAthan USB installer
 
-Chrome / Edge USB installer for ESP8266 MyAthan boxes. Lives only on `esp8266-web-flasher`.
+Install or recover the ESP8266 MyAthan box from a computer.
 
-How to update firmware, OTA, and this page later: **[INSTRUCTIONS.md](INSTRUCTIONS.md)**.
+**Page:** https://mecharonix.github.io/myathan-firmware/
 
-- Do **not** merge this into `main` or `esp8266-ota`.
-- Each deploy compiles `esp8266-wip-bridge` as a USB image: 4M2M OTA slots, Wi‑Fi retry, full UI, production OTA channel (`esp8266-latest`), `ssl=all`.
-- That is not the GitHub `esp8266-latest` 2.2.8 revert (4M3M, no Wi‑Fi retry).
-- Skip **Erase device** on an already-set-up box. EEPROM (offsets, method, location, volume) and SDK Wi‑Fi live past the sketch and survive a no-erase USB write.
-- Site: after Pages deploys, open `https://mecharonix.github.io/myathan-firmware/`
+This page always installs the same firmware as GitHub **esp8266-latest**.
+
+## What’s in 2.2.10
+
+- Volume stays at the level you set
+- Joins saved Wi‑Fi after a power cut
+- Setup page should open on **MyAthan Setup**
+- **http://myathan.local** after it is on your network
+
+## When to use this page
+
+Use USB if the box is new, stuck, or OTA says **Not Enough space**.
+
+If the box is already on **2.2.9 or 2.2.10**, prefer **http://myathan.local** → Check for Updates (or wait for the automatic check). You do not need to USB-flash every update.
+
+## How to flash
+
+1. Chrome or Edge on a PC (not a phone).
+2. Plug in USB. Windows may need the CH340 driver.
+3. Connect, pick the USB/CH340 port (not Bluetooth).
+4. Leave **Erase** unchecked if the box was already set up.
+5. After it finishes, wait for home Wi‑Fi, or join **MyAthan Setup** and use http://192.168.4.1 if asked.
