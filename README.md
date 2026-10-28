@@ -41,37 +41,35 @@ MyAthan is an open-source smart prayer time device that plays the athan (Islamic
 
 ## Hardware
 
-| Component | Model | Cost | Purpose |
-|-----------|-------|------|---------|
-| Microcontroller | ESP32-C3 SuperMini | ~$1.50 | WiFi + BLE, 400KB RAM, 4MB flash |
-| Audio | DFPlayer Mini | ~$1.00 | MP3/WAV playback, 3W amp, UART |
-| Storage | Micro SD card | ~$1.00 | Athan audio files (FAT32, up to 32GB) |
-| Speaker | 4ohm 3W | ~$0.50 | Audio output |
-| Indicator | LED | ~$0.10 | Status patterns (9 states) |
-| Input | Tactile button | ~$0.05 | Manual trigger / WiFi reset |
-| **Total** | | **~$4.15** | |
+Commercial-board bring-up pinout for the ESP32-C3 SuperMini.
+
+### Board
+
+- ESP32-C3 SuperMini
+- MAX98357A I2S amplifier
+- Winbond 25Q64JVSIQ SPI flash
+- 10x WS2812B LEDs
+- 2x momentary push buttons (volume up, volume down)
 
 ### Wiring
 
-```
-ESP32-C3 SuperMini          DFPlayer Mini
-┌──────────────┐           ┌──────────────┐
-│          GPIO6 ──────────▶ RX           │
-│          GPIO7 ◀────────── TX           │
-│              │           │              │
-│          GPIO8 ──── LED  │    SPK1 ─── Speaker (+)
-│          GPIO9 ──── BTN  │    SPK2 ─── Speaker (-)
-│            5V ───────────▶ VCC          │
-│           GND ───────────▶ GND          │
-└──────────────┘           └──────────────┘
-```
+| Component | Component pin | ESP32 pin | Description |
+| --- | --- | --- | --- |
+| Power | MAX98357 Vin and LED strip +5V | 5V | Main 5V power |
+| Power | Winbond VCC | 3V3 | 3.3V flash power |
+| Power | GND (all components) | GND | Shared common ground |
+| Winbond 25Q64JVSIQ | CLK | Pin 4 | Hardware SPI clock |
+| Winbond 25Q64JVSIQ | DO / MISO | Pin 5 | Hardware SPI MISO |
+| Winbond 25Q64JVSIQ | DI / MOSI | Pin 6 | Hardware SPI MOSI |
+| Winbond 25Q64JVSIQ | CS /CS | Pin 7 | Hardware SPI chip select |
+| MAX98357A | BCLK | Pin 1 | I2S bit clock |
+| MAX98357A | LRC / WS | Pin 10 | I2S word select |
+| MAX98357A | DIN | Pin 3 | I2S audio data |
+| WS2812B (10 LEDs) | DIN | Pin 0 | LED data (pin 0, same as WLED config) |
+| Volume up button | signal | Pin 20 | Connects to GND when pressed |
+| Volume down button | signal | Pin 21 | Connects to GND when pressed |
 
-| Pin | GPIO | Function | Notes |
-|-----|------|----------|-------|
-| UART0 | TX=21, RX=20 | Serial logging | USB CDC debug output |
-| UART1 | TX=6, RX=7 | DFPlayer Mini | Hardware serial, 9600 baud |
-| LED | GPIO8 | Status indicator | 9 patterns (see below) |
-| Button | GPIO9 | User input | INPUT_PULLUP, active LOW |
+Button inputs are active-low (they connect to GND when pressed).
 
 ---
 
